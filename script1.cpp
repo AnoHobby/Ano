@@ -1,15 +1,17 @@
 ﻿#include <iostream>
+//変数の名前はそのすこーぶ内の名前を連結さっせてやるとスコープ管理とかいらないかも
 #include <string>
 #include <utility>
 #include <regex>
 #include <stack>
 #include <unordered_map>
 #include <any>
+#include <functional>
 #include <windows.h>
 template <typename T>
-auto resizeAssign(std::vector<T> &vec,size_t index,T value) {
+auto resizeAssign(std::vector<T>& vec, size_t index, T value) {
 	if (vec.size() <= index) {
-		vec.resize(index+1);
+		vec.resize(index + 1);
 	}
 	return vec[index] = value;
 }
@@ -31,6 +33,7 @@ concept DivC = requires(T t) {
 };
 class Any {
 private:
+	class None {};
 	class Base {
 	public:
 		virtual ~Base() {}
@@ -48,10 +51,6 @@ private:
 		class Implement {
 		private:
 		public:
-			//template <class TFR,class... TFA, class FFR, class... FFA >
-			//auto operator()(std::function<TFR(TFA...)> trueFunc, std::function<FFR(FFA...)>  falseFunc,TFA... trueFuncArg,FFA... falseFuncArg) {//引数を変えたい場合これだとfunctionを自動で作ってくれないからエラー
-			//	return falseFunc(falseFuncArg...);
-			//}
 		};
 		template <>
 		class Implement<false> {
@@ -98,7 +97,7 @@ public:
 	Any(T const& value) :data(std::make_unique<Derived<T> >(value)) {
 
 	}
-	Any() {}
+	Any() :data(std::make_unique<Derived<None> >(None())) {}
 	Any(const Any& any) {
 		data = any.data->clone();
 	}
@@ -131,14 +130,14 @@ enum class TOKEN {
 	T_EOF,
 	NUMBER,
 	RESERVED,
-	VARIABLE
+	IDENT
 };
 class Token {
 private:
 public:
 	auto tokenize(std::string source) {
-		std::vector<std::pair<TOKEN,std::string> > data;
-		auto check = [&](auto t,auto r) {
+		std::vector<std::pair<TOKEN, std::string> > data;
+		auto check = [&](auto t, auto r) {
 			std::smatch m;
 			if (!std::regex_search(source, m, r))return false;
 			data.push_back({ t,m[0].str() });
@@ -149,10 +148,10 @@ public:
 			if (check(TOKEN::NUMBER, std::regex(R"(^\d+)"))) {
 				continue;
 			}
-			else if (check(TOKEN::RESERVED,std::regex(R"(^(func|return|else|while|if|==|<=|>=|!=|[{}+-/*\(\)=<>]))"))) {
+			else if (check(TOKEN::RESERVED, std::regex(R"(^(func|return|else|while|if|==|<=|>=|!=|[;{}+-/*\(\)=<>]))"))) {
 				continue;
 			}
-			else if (check(TOKEN::VARIABLE,std::regex(R"(^[a-zA-Z_][\w]*)"))) {//\s^/d
+			else if (check(TOKEN::IDENT, std::regex(R"(^[a-zA-Z_][\w]*)"))) {//\s^/d
 				continue;
 			}
 			source = source.substr(1);
@@ -177,223 +176,29 @@ enum class NODE {
 	ELSE,
 	WHILE,
 	BLOCK,
+	FUNCTION,
+	PROGRAM,
+	CALL,
+	ARGUMENT,
+	RETURN,
+	NONE,
+	CALL_ARGUMENT,
 };
 class Node {
 private:
-public:
-	NODE node;
+	/*std::vector<Node > access;*/
 	std::vector<Node > access;
-	Any value;
-};
-class Perser {
-private:
-	std::vector<std::pair<TOKEN, std::string> > data;
-	decltype(data.begin()) iter;
-	auto number() {
-		Node node;//*iter++でもいいかも
-		node.node = NODE::NUMBER;
-		node.value = std::stoi((*iter).second);
-		++iter;
-		return node;
-	}
-	Node primary();
-	Node unary();
-	Node ifExpr();
-	Node whileExpr();
-	Node block();
-	auto mul() {
-		auto node = unary();
-		while (true) {
-			if ((*iter).second == "*"&& data.end() >= iter + 1) {
-				++iter;
-				resizeAssign(node.access, 0, node);
-				resizeAssign(node.access, 1, unary());
-				node.node = NODE::MUL;
-			}
-			else if ((*iter).second == "/" && data.end() >= iter + 1) {
-				++iter;
-				resizeAssign(node.access, 0, node);
-				resizeAssign(node.access, 1, unary());
-				node.node = NODE::DIV;
-			}
-			else {
-				break;
-			}
-
-		}
-		return node;
-	}
-	auto add() {
-		auto node = mul();
-		while (true) {
-			if ((*iter).second == "+"&& data.end() >= iter + 1) {
-				++iter;
-				resizeAssign(node.access, 0, node);
-				resizeAssign(node.access, 1, mul());
-				node.node = NODE::ADD;
-			}
-			else if ((*iter).second == "-"&& data.end() >= iter + 1) {
-				++iter;
-				resizeAssign(node.access, 0, node);
-				resizeAssign(node.access, 1, mul());
-				node.node = NODE::SUB;
-			}
-			else {
-				break;
-			}
-		}
-		return node;
-	}
-	auto compare() {
-		auto node = add();
-		auto editNode = [&](bool swap,NODE flag) {
-			++iter;
-			resizeAssign(node.access, 0^swap, node);
-			resizeAssign(node.access, 1^swap, add());
-			node.node = flag;
-		};
-		if ((*iter).second=="==") {
-			editNode(false,NODE::EQUAL);
-		}
-		else if ((*iter).second == "!=") {
-			editNode(false, NODE::NOT_EQUAL);
-		}
-		else if ((*iter).second == "<") {
-			editNode(false, NODE::LESS);
-		}
-		else if ((*iter).second == "<=") {
-			editNode(false, NODE::EQUAL_LESS);
-		}
-		else if ((*iter).second == ">") {
-			editNode(true, NODE::LESS);
-		}
-		else if ((*iter).second == ">=") {
-			editNode(true, NODE::EQUAL_LESS);
-		}
-		return node;
-	}
-	auto variable() {
-		Node node;
-		node.node = NODE::VARIABLE;
-		node.value = (*iter).second;
-		++iter;
-		return node;
-	}
-	auto expr() {
-		if (data.end() >= iter + 2 && (*iter).first == TOKEN::VARIABLE && (*(1 + iter)).second == "=") {
-			auto node = variable();
-			++iter;
-			resizeAssign(node.access, 0, node);
-			resizeAssign(node.access, 1, compare());
-			//Node node;
-			//node.node = NODE::VARIABLE;
-			//node.value = (*(iter)).second;
-			//iter += 2;
-			//resizeAssign(node.access, 0, variable());
-			//resizeAssign(node.access, 1, compare());
-			node.node = NODE::ASSIGN;
-			return node;
-		}
-		else if ((*iter).second == "if") {
-			++iter;
-			return ifExpr();
-		}
-		else if (iter->second == "while") {
-			++iter;
-			return whileExpr();
-		}
-		else if (iter->second=="{") {
-			++iter;
-			return block();
-		}
-		return compare();
-	}
 public:
-	Perser(decltype(data) data):data(data),iter(this->data.begin()) {
-
-	}
-	auto perser() {
-		std::vector<Node > nodes;
-		nodes.push_back(expr());
-		while ((*iter).second == ","&&data.end() >= iter + 1) {
-			++iter;
-			nodes.push_back(expr());
+	static constexpr auto LEFT = 0, RIGHT = 1, SELF = -1;
+	NODE node = NODE::NONE;
+	Any value;
+	auto& operator[](size_t index) {
+		if (access.size() <= index) {
+			access.resize(index + 1);
 		}
-		return nodes;
+		return access[index];
 	}
 };
-Node Perser::unary() {
-	if ((*iter).second == "+" && data.end() >= iter + 1) {//よくgithubみてみな
-		++iter;
-		return primary();
-	}
-	else if ((*iter).second == "-" && data.end() >= iter + 1) {
-		++iter;
-		Node node;
-		node.node = NODE::NUMBER;
-		node.value = 0;
-		resizeAssign(node.access,0,node);
-		node.node = NODE::SUB;
-		resizeAssign(node.access, 1, primary());
-		return node;
-	}
-	return primary();
-}
-Node Perser::primary() {
-	if ((*iter).second == "("&& data.end() >= iter + 1) {
-		++iter;
-		auto node=compare();
-		++iter;
-		return node;
-	}
-	else if (TOKEN::VARIABLE == (*iter).first&& data.end() >= iter + 1) {//(*iter++)
-		return variable();
-	}
-	return number();
-}
-Node Perser::ifExpr() {
-	iter = ++std::find(iter, data.end(), std::pair{ TOKEN::RESERVED,std::string("(") });
-	auto node = compare();
-	iter = ++std::find(iter, data.end(), std::pair{ TOKEN::RESERVED,std::string(")") });
-	auto expression = expr();
-	if ((*(1+iter)).second == "else") {
-		iter+=3;
-		auto exprElse = expr();
-		resizeAssign(exprElse.access,0,expression);
-		resizeAssign(exprElse.access, 1, exprElse);
-		exprElse.node = NODE::ELSE;
-		resizeAssign(node.access, 0, node);
-		resizeAssign(node.access, 1, exprElse);
-		node.node = NODE::IF;
-		return node;
-	}
-	resizeAssign(node.access, 0, node);
-	resizeAssign(node.access, 1, expression);
-	node.node = NODE::IF;
-	return node;
-	//if (find == data.end());
-}
-Node Perser::whileExpr() {
-	++iter;//(
-	auto node = compare();
-	++iter;//)
-	resizeAssign(node.access, 0, node);
-	resizeAssign(node.access, 1, expr());
-	node.node = NODE::WHILE;
-	return node; 
-}
-Node Perser::block() {
-	auto node = expr();
-	while (iter->second == ",") {
-		++iter;
-		resizeAssign(node.access, 0, node);
-		resizeAssign(node.access, 1, expr());
-		node.node = NODE::BLOCK;
-	}
-	++iter;//}
-	return node;
-
-}
 enum class OPERATION {
 	PUSH,
 	POP,
@@ -410,125 +215,145 @@ enum class OPERATION {
 	EQUAL_LESS,
 	JUMP,
 	JZ,
-	DUMMY
+	LABEL,
+	EXIT,
+	RETURN,
+	CALL,
 };
 class Operation {
 private:
 public:
 	OPERATION opCode;
 	std::vector<DWORD> operands;
-	Operation(decltype(opCode) opCode, decltype(operands) operands):opCode(opCode),operands(operands) {
+	Operation(decltype(opCode) opCode, decltype(operands) operands) :opCode(opCode), operands(operands) {
 
 	}
 };
 class Generator {
 private:
+	std::string scope;
+	int callScope;
 	std::vector<Operation> operations;
-	std::unordered_map<std::string,int> variables;
-	unsigned int offset,label;
+	std::unordered_map<std::string, int> variables, functions;
+	std::unordered_map<int, int>  funcArg;
+	unsigned int offset, label, arg;
+	bool isFuncFirst;
 	auto getVar(decltype(variables)::key_type variable) {
 		if (!variables.count(variable)) {
 			variables.emplace(variable, offset++);
 		}
-		operations.push_back(Operation(OPERATION::PUSH_I, { (DWORD)variables.at(variable) }));//kyasuto
+		operations.push_back(Operation(OPERATION::PUSH_I, { (DWORD)variables.at(variable) }));
+		return variables.at(variable);
+	}
+	auto getFunc(decltype(variables)::key_type funcname) {
+		if (!functions.count(funcname)) {
+			functions.emplace(funcname, label++);
+		}
+		return functions.at(funcname);
 	}
 public:
 	std::vector<Operation> codegen(Node node) {
-		//ここにoperations入れる場合は返り血を連結する
 		switch (node.node) {
 		case NODE::NUMBER:
-			operations.push_back(Operation(OPERATION::PUSH_I, { (DWORD)node.value.get<int>()}));
+			operations.push_back(Operation(OPERATION::PUSH_I, { (DWORD)node.value.get<int>() }));
 			break;
 		case NODE::ADD:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::POP, { 1 }));
 			operations.push_back(Operation(OPERATION::ADD, { 0,1 }));
 			break;
 		case NODE::MUL:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::POP, { 1 }));
 			operations.push_back(Operation(OPERATION::MUL, { 0,1 }));
 			break;
 		case NODE::SUB:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::POP, { 1 }));
 			operations.push_back(Operation(OPERATION::SUB, { 1,0 }));
 			break;
 		case NODE::DIV:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::POP, { 1 }));
 			operations.push_back(Operation(OPERATION::DIV, { 1,0 }));
 			break;
 		case NODE::ASSIGN:
-			getVar(node.access[0].value.get<std::string>());
-			codegen(node.access[1]);
+			getVar(scope + node[Node::LEFT].value.get<std::string>());
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation{ OPERATION::POP, {1} });
 			operations.push_back(Operation{ OPERATION::POP, {0} });
 			operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
 			operations.push_back(Operation{ OPERATION::PUSH, {1} });
 			break;
 		case NODE::VARIABLE:
-			getVar(node.value.get<std::string>());
+		{
+			auto valOffset = getVar(scope + node.value.get<std::string>());//
+			if (isFuncFirst && !funcArg.count(valOffset)) {
+				isFuncFirst = false;
+				funcArg.emplace(std::stoi(scope), valOffset);
+
+			}
 			operations.push_back(Operation{ OPERATION::POP, {0} });
 			operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
 			operations.push_back(Operation{ OPERATION::PUSH, {1} });
-			break;
+		}
+		break;
 		case NODE::EQUAL:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
-			operations.push_back(Operation{OPERATION::POP,{0}});
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
+			operations.push_back(Operation{ OPERATION::POP,{0} });
 			operations.push_back(Operation{ OPERATION::POP,{1} });
 			operations.push_back(Operation{ OPERATION::EQUAL,{1,0} });
 			break;
 		case NODE::NOT_EQUAL:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation{ OPERATION::POP,{0} });
 			operations.push_back(Operation{ OPERATION::POP,{1} });
 			operations.push_back(Operation{ OPERATION::NOT_EQUAL,{1,0} });
 			break;
 		case NODE::LESS:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation{ OPERATION::POP,{0} });
 			operations.push_back(Operation{ OPERATION::POP,{1} });
 			operations.push_back(Operation{ OPERATION::LESS,{1,0} });
 			break;
 		case NODE::EQUAL_LESS:
-			codegen(node.access[0]);
-			codegen(node.access[1]);
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation{ OPERATION::POP,{0} });
 			operations.push_back(Operation{ OPERATION::POP,{1} });
 			operations.push_back(Operation{ OPERATION::EQUAL_LESS,{1,0} });
 			break;
 		case NODE::IF:
-			codegen(node.access[0]);
-			operations.push_back(Operation(OPERATION::POP,{0}));
-			if (node.access[1].node == NODE::ELSE) {
+			codegen(node[Node::LEFT]);
+			operations.push_back(Operation(OPERATION::POP, { 0 }));
+			if (node[Node::RIGHT].node == NODE::ELSE) {
 				auto label1 = label++, label2 = label++;
-				operations.push_back(Operation{ OPERATION::JZ,{0,label1}});
-				codegen(node.access[1].access[0]);
-				operations.push_back(Operation(OPERATION::POP,{0}));
-				operations.push_back(Operation(OPERATION::JUMP, { label2 }));
-				operations.push_back(Operation(OPERATION::DUMMY,{label1 }));
-				codegen(node.access[1].access[1]);
+				operations.push_back(Operation{ OPERATION::JZ,{0,label1} });
+				codegen(node[Node::RIGHT][Node::LEFT]);
 				operations.push_back(Operation(OPERATION::POP, { 0 }));
-				operations.push_back(Operation(OPERATION::DUMMY, { label2 }));
+				operations.push_back(Operation(OPERATION::JUMP, { label2 }));
+				operations.push_back(Operation(OPERATION::LABEL, { label1 }));
+				codegen(node[Node::RIGHT][Node::RIGHT]);
+				operations.push_back(Operation(OPERATION::POP, { 0 }));
+				operations.push_back(Operation(OPERATION::LABEL, { label2 }));
 			}
 			else {
 				auto label1 = label++;
 				operations.push_back(Operation(OPERATION::JZ, { 0,label1 }));
-				codegen(node.access[1]);
+				codegen(node[Node::RIGHT]);
 				operations.push_back(Operation(OPERATION::POP, { 0 }));
-				operations.push_back(Operation(OPERATION::DUMMY, { label1 }));
+				operations.push_back(Operation(OPERATION::LABEL, { label1 }));
 
 			}
 			operations.push_back(Operation(OPERATION::PUSH_I, { 0 }));
@@ -536,30 +361,103 @@ public:
 		case NODE::WHILE:
 		{
 			auto label1 = label++, label2 = label++;
-			operations.push_back(Operation(OPERATION::DUMMY, { label1 }));
-			codegen(node.access[0]);
+			operations.push_back(Operation(OPERATION::LABEL, { label1 }));
+			codegen(node[Node::LEFT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::JZ, { 0, label2 }));
-			codegen(node.access[1]);
+			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::JUMP, { label1 }));
-			operations.push_back(Operation(OPERATION::DUMMY, { label2 }));
+			operations.push_back(Operation(OPERATION::LABEL, { label2 }));
 			operations.push_back(Operation(OPERATION::PUSH_I, { 0 }));
 		}
-			break;
+		break;
 		case NODE::BLOCK:
-			codegen(node.access[0]);
-			operations.push_back(Operation(OPERATION::POP, { 0 }));
-			codegen(node.access[1]);
+			if (node[Node::LEFT].node != NODE::NONE) {
+				codegen(node[Node::LEFT]);
+				operations.push_back(Operation(OPERATION::POP, { 0 }));
+			}
+			codegen(node[Node::RIGHT]);
 			break;
+		case NODE::PROGRAM:
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
+			//operations.push_back(Operation(OPERATION::POP,{0}));
+			break;
+		case NODE::FUNCTION:
+		{
+			if (node[Node::LEFT].node == NODE::CALL) {
+				auto func = getFunc(node[Node::LEFT].value.get<std::string>());
+				scope = std::to_string(func);
+				operations.push_back(Operation(OPERATION::LABEL, { (DWORD)func }));
+				codegen(node[Node::RIGHT]);
+			}
+			else {
+				auto func = getFunc(node[Node::LEFT][Node::LEFT].value.get<std::string>());
+				scope = std::to_string(func);
+				isFuncFirst = true;
+				codegen(node[Node::LEFT][Node::RIGHT]);
+				operations.push_back(Operation(OPERATION::LABEL, { (DWORD)func }));
+				codegen(node[Node::RIGHT]);
+			}
+		}
+		break;
+		case NODE::RETURN:
+			codegen(node[Node::RIGHT]);
+			operations.push_back(Operation(OPERATION::RETURN, {}));//return value?
+			break;
+		case NODE::CALL:
+			operations.push_back(Operation(OPERATION::CALL, { (DWORD)getFunc(node.value.get<std::string>()) }));
+			break;
+		case NODE::ARGUMENT:
+			codegen(node[Node::LEFT]);
+			codegen(node[Node::RIGHT]);
+			break;
+		case NODE::CALL_ARGUMENT:
+		{
+
+			const auto assign = [&](auto access) {
+				operations.push_back(Operation(OPERATION::PUSH_I, { arg + funcArg.at(callScope) }));
+				codegen(node[access]);
+				operations.push_back(Operation{ OPERATION::POP, {1} });
+				operations.push_back(Operation{ OPERATION::POP, {0} });
+				operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
+				operations.push_back(Operation{ OPERATION::PUSH, {1} });
+				operations.push_back(Operation{ OPERATION::POP, {0} });
+			};
+			if (node[Node::LEFT].node == NODE::CALL) {
+				callScope = getFunc(node[Node::LEFT].value.get<std::string>());
+				if (node[Node::RIGHT].node != NODE::CALL_ARGUMENT) {
+					assign(Node::RIGHT);
+				}
+				else codegen(node[Node::RIGHT]);
+				codegen(node[Node::LEFT]);
+				arg = 0;
+				break;
+			}
+			else if (node[Node::LEFT].node != NODE::CALL_ARGUMENT) {
+				assign(Node::LEFT);
+			}
+			else codegen(node[Node::LEFT]);
+			++arg;
+			assign(Node::RIGHT);
+
+		}
+		break;
 		}
 
+		return operations;
+	}
+	std::vector<Operation> codegen(std::pair<bool, Node> nodes) {
+		codegen(nodes.second);
+		operations.emplace(operations.begin(), Operation(OPERATION::CALL, { (DWORD)getFunc("main") }));
+		operations.emplace(std::next(operations.begin(), 1), Operation(OPERATION::EXIT, {}));
 		return operations;
 	}
 	std::vector<Operation> codegen(std::vector<Node > nodes) {
 		for (auto& node : nodes) {
 			codegen(node);
-			operations.push_back(Operation(OPERATION::POP,{0}));
+			operations.push_back(Operation(OPERATION::POP, { 0 }));
 		}
 		return operations;
 	}
@@ -572,12 +470,13 @@ private:
 public:
 	auto run(std::vector<Operation> code) {
 		std::unordered_map<int, decltype(code)::iterator > labels;
-		for (auto op = code.begin(); op != code.end();++op) {
-			if ((* op).opCode == OPERATION::DUMMY) {
-				labels.insert_or_assign((* op).operands[0], op);
+		for (auto op = code.begin(); op != code.end(); ++op) {
+			if ((*op).opCode == OPERATION::LABEL) {
+				labels.insert_or_assign((*op).operands[0], op);
 			}
 		}
-		for (auto op = code.begin(); op != code.end(); ++op) {
+		for (auto op = code.begin();
+			op->opCode != OPERATION::EXIT; ++op) {
 			switch (op->opCode) {
 			case OPERATION::PUSH:
 				stack.push(reg[op->operands[0]]);
@@ -587,7 +486,7 @@ public:
 				stack.pop();
 				break;
 			case OPERATION::ADD:
-				stack.push(reg[op->operands[0]]+ reg[op->operands[1]]);
+				stack.push(reg[op->operands[0]] + reg[op->operands[1]]);
 				break;
 			case OPERATION::MUL:
 				stack.push(reg[op->operands[0]] * reg[op->operands[1]]);
@@ -602,7 +501,7 @@ public:
 				stack.push(op->operands[0]);
 				break;
 			case OPERATION::STORE:
-				resizeAssign(val,reg[op->operands[0]], reg[op->operands[1]]);
+				resizeAssign(val, reg[op->operands[0]], reg[op->operands[1]]);
 				break;
 			case OPERATION::LOAD:
 				resizeAssign(reg, op->operands[0], val[reg[op->operands[1]]]);
@@ -623,27 +522,219 @@ public:
 				op = labels[op->operands[0]];
 				break;
 			case OPERATION::JZ:
-				if (0 != reg[op->operands[0]])break;
+				if (reg[op->operands[0]])break;
 				op = labels[op->operands[1]];
 				break;
+			case OPERATION::CALL:
+				stack.push(std::distance(code.begin(), op));
+				op = labels[op->operands[0]];
+				break;
+			case OPERATION::RETURN:
+				resizeAssign(reg, 2, stack.top());
+				stack.pop();
+				op = std::next(code.begin(), stack.top());
+				stack.pop();
+				stack.push(reg[2]);
+				break;
+
 			}
 		}
-		return reg[0];
-		//auto output = stack.top();
-		//stack.pop();
-		//return output;
+		return reg[2];
 	}
 };
+class BNF {
+private:
+	std::function<std::pair<bool, Node>()> bnf;
+public:
+	BNF() {};
+	BNF(decltype(bnf) bnf) :bnf(bnf) {}
+	auto operator()() {
+		return bnf();
+	}
+};
+class Expression {
+private:
+public:
+	auto expect(std::vector<std::pair<TOKEN, std::string> >::iterator& iter, BNF bnf, std::string_view str) {
+		return BNF([=, &iter]()mutable {
+			auto prev = iter;
+			auto node = bnf();
+			if (!node.first)return std::pair(false, Node());
+			if (iter->first != TOKEN::T_EOF && iter->second == str) {
+				++iter;
+				return node;
+			}
+			iter = prev;
+			node.first = false;
+			return node;
+			});
+	}
+	auto reverce(BNF bnf) {
+		return BNF([=]()mutable {
+			auto node = bnf();
+			if (!node.first)return node;
+			std::swap(node.second[Node::LEFT], node.second[Node::RIGHT]);
+			return node;
+			});
+	}
+	auto regist(NODE nodeOp, BNF right, decltype(Node::SELF) access = Node::RIGHT) {
+		return BNF([=]()mutable {
+			auto node = right();
+			if (!node.first) return node;
+			if (access == Node::SELF) {
+				node.second.node = nodeOp;
+				return node;
+			}
+			Node temp;
+			temp[access] = node.second;
+			temp.node = nodeOp;
+			return std::pair(true, temp);
+			});
+	}
+	auto link(std::vector<std::pair<TOKEN, std::string> >::iterator& iter, std::string_view str, BNF right) {
+		return BNF([=, &iter]()mutable {
+			if (iter->first != TOKEN::T_EOF && iter->second == str) {
+				++iter;
+				return right();
+			}
+			return std::pair(false, Node());
+			});
+	}
+	auto link(std::vector<std::pair<TOKEN, std::string> >::iterator& iter, BNF left, BNF right) {
+		return BNF([=, &iter]()mutable {
+			auto prev = iter;
+			auto node = left();
+			if (!node.first) {
+				iter = prev; return std::pair(false, node.second);
+			}
+			auto nodeRight = right();
+			if (!nodeRight.first) { iter = prev; return std::pair(false, node.second); }
+			nodeRight.second[Node::LEFT] = node.second;
+			node = nodeRight;
+			return node;
+			});
+	}
+	auto _or(BNF left, BNF right) {
+		return BNF([=]()mutable {
+			auto node = left();
+			if (node.first || (node = right()).first) {
+				node.first = true;
+				return node;
+			}
+			return node;
+			});
+	}
+	auto ifAny(BNF left, BNF right) {
+		return BNF([=]()mutable {
+			auto node = left();
+			if (!node.first)return node;
+			auto nodeRight = right();
+			if (!nodeRight.first)return node;
+			nodeRight.second[Node::LEFT] = node.second;
+			node = nodeRight;
+			return node;
+			});
+	}
+	auto loop(BNF left, BNF right) {
+		return BNF([=]()mutable {
+			auto node = left();
+			while (node.first) {
+				auto nodeRight = right();
+				if (!nodeRight.first)return node;
+				nodeRight.second[Node::LEFT] = node.second;
+				node = nodeRight;
+			}
+			return node;
+			});
+	}
+};
+
 int main() {
-	Token token;
-	Perser perser(token.tokenize(*std::istream_iterator<std::string>(std::cin)));
-	//Perser perser(token.tokenize("if(0==0)val=10,val+1"));
+	auto data = Token().tokenize("func test(val,val2){return 100+val2};func main(){return test(1,2)}");
+	auto iter = data.begin();
+	BNF number([&] {
+		if (iter->first != TOKEN::NUMBER)return std::pair{ false,Node() };
+		Node node;
+		node.node = NODE::NUMBER;
+		node.value = std::stoi((*iter).second);
+		++iter;
+		return std::pair(true, node);
+		});
+	BNF ident([&] {
+		if (iter->first != TOKEN::IDENT) {
+			return std::pair(false, Node());
+		}
+		Node node;
+		node.value = (iter++)->second;
+		if (iter->second == "(") {
+			node.node = NODE::CALL;
+		}
+		else node.node = NODE::VARIABLE;
+		return std::pair(true, node);
+		});
+	Expression e;
+	BNF program, mul, add, primary, expr, compare, ifExpr, whileExpr, block, ret, call, function;
+	BNF unary([&] {
+		if (iter->second == "+") {
+			++iter;
+		}
+		else if (iter->second == "-") {
+			++iter;
+			auto node = primary();
+			node.second[Node::RIGHT] = node.second;
+			node.second.value = 0;
+			node.second[Node::LEFT] = node.second;
+			node.second.node = NODE::SUB;
+			return node;
+		}
+		return primary();
+		});
+	mul = e.loop(unary, e._or(e.regist(NODE::MUL, e.link(iter, "*", unary)), e.regist(NODE::DIV, e.link(iter, "/", unary))));
+	add = e.loop(mul, e._or(e.regist(NODE::ADD, e.link(iter, "+", mul)), e.regist(NODE::SUB, e.link(iter, "-", mul))));
+	compare = e._or(e._or(e.link(iter, add, e._or(e.regist(NODE::EQUAL, e.link(iter, "==", add)), e._or(e.regist(NODE::NOT_EQUAL, e.link(iter, "!=", add)), e._or(e.regist(NODE::LESS, e.link(iter, "<", add)), e.regist(NODE::EQUAL_LESS, e.link(iter, "<=", add)))))), e.reverce(e.link(iter, add, e._or(e.regist(NODE::LESS, e.link(iter, ">", add)), e.regist(NODE::EQUAL_LESS, e.link(iter, ">=", add)))))), add);
+	whileExpr = BNF([&] {
+		static auto bnf = e.link(iter, e.expect(iter, e.link(iter, "while", e.link(iter, "(", compare)), ")"), e.regist(NODE::WHILE, expr));
+		return bnf();
+		});
+	ifExpr = BNF([&] {
+		static auto bnf = e.link(iter, e.link(iter, "if", e.expect(iter, e.link(iter, "(", compare), ")")),
+			e.regist(NODE::IF,
+				e.ifAny(
+					expr,
+					e.link(iter,
+						"else",
+						e.regist(NODE::ELSE,
+							expr)))
+			)
+		);
+		return bnf();
+		});
+	block = BNF([&] {
+		static auto bnf = e.expect(iter, e.link(iter, "{", e.regist(NODE::BLOCK, e.loop(expr, e.regist(NODE::BLOCK, e.link(iter, ";", expr))))), "}");
+		return bnf();
+		});
+	call = BNF([&] {
+		static auto bnf = e.expect(iter, e.ifAny(e.expect(iter, ident, "("), e.regist(NODE::CALL_ARGUMENT, e.loop(expr, e.link(iter, ",", e.regist(NODE::CALL_ARGUMENT, expr))))), ")");
+		return bnf();
+		});
+	ret = BNF([&] {
+		static auto bnf = e.link(iter, "return", e.regist(NODE::RETURN, expr));
+		return bnf();
+		});
+	primary = e._or(e._or(e._or(e.expect(iter, e.link(iter, "(", compare), ")"), call), ident), number);
+	function = BNF([&] {
+		static auto bnf = e.link(iter, e.ifAny(e.link(iter, "func", e.expect(iter, ident, "(")), e.regist(NODE::ARGUMENT, e.loop(expr, e.link(iter, ",", e.regist(NODE::ARGUMENT, expr))))), e.link(iter, ")", e.regist(NODE::FUNCTION, block)));
+		return bnf();
+		});
+	expr = e._or(e._or(e._or(e._or(e._or(e.link(iter, ident, e.regist(NODE::ASSIGN, e.link(iter, "=", compare))), whileExpr), ifExpr), ret), block), compare);
+	program = e.loop(function, e.regist(NODE::PROGRAM, e.link(iter, ";", function)));
 	Generator generator;
 	VM vm;
-	//perser.perser();
-	std::cout<<vm.run(generator.codegen(perser.perser()));
-	//for (auto& [token, str] : token.tokenize(*std::istream_iterator<std::string>(std::cin))) {//token.tokenize(*std::istream_iterator<std::string>(std::cin))
-	//	std::cout <<(int)token << "," << str << std::endl;
-	//}
+	try {
+		std::cout << vm.run(generator.codegen(program()));
+	}
+	catch (std::string message) {
+		std::cout << message << std::endl;
+	}
 	return EXIT_SUCCESS;
 }
