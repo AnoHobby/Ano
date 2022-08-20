@@ -1,5 +1,4 @@
 ﻿#include <iostream>
-//変数の名前はそのすこーぶ内の名前を連結さっせてやるとスコープ管理とかいらないかも
 #include <string>
 #include <utility>
 #include <regex>
@@ -7,6 +6,7 @@
 #include <unordered_map>
 #include <any>
 #include <functional>
+#include <fstream>
 #include <windows.h>
 template <typename T>
 auto resizeAssign(std::vector<T>& vec, size_t index, T value) {
@@ -31,6 +31,10 @@ template <class T>
 concept DivC = requires(T t) {
 	t / t;
 };
+template <class T>
+concept LessC = requires(T t) {
+	t < t;
+};
 class Any {
 private:
 	class None {};
@@ -42,6 +46,7 @@ private:
 		virtual Any sub(Any&) = 0;
 		virtual Any mul(Any&) = 0;
 		virtual Any div(Any&) = 0;
+		virtual bool less(Any&) = 0;
 	};
 	template <class T>
 	class Derived :public Base {
@@ -90,6 +95,9 @@ private:
 		Any div(Any& any) override {
 			return Implement<DivC<T> >()([](auto value, auto any) {return Any(value / any.get<T>()); }, [](auto value, auto any) {return any; }, value, any);;
 		}
+		bool less(Any& any)override {
+			return Implement<LessC<T> >()([](auto value, auto any) {return value < any.get<T>(); }, [](auto value, auto any) {return false; }, value, any);
+		}
 	};
 	std::unique_ptr<Base> data;
 public:
@@ -120,38 +128,70 @@ public:
 	auto operator/(Any& any) {
 		return data->div(any);
 	}
+	auto operator<(Any& any) {
+		return data->less(any);
+	}
+	auto operator>(Any& any) {
+		return any.data->less(*this);
+	}
+	auto operator<=(Any& any) {
+		return !((*this)>any);
+	}
+	auto operator>=(Any& any) {
+		return !(any<(*this));
+	}
+	auto operator!=(Any& any) {
+		return ((*this) < any) || (any < (*this));
+	}
+	auto operator==(Any& any) {
+		return !((* this) != any);
+	}
 	template <class T>
 	auto get() {
 		auto p = dynamic_cast<Derived<T> *>(data.get());
 		return p->get();
 	}
 };
+class File {
+private:
+	const std::string content;
+public:
+	File(std::string name) :content([&]()->std::string {
+		std::fstream file(name);
+		if (!file.is_open())return "";
+		return std::string(std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>());
+		}()) {
+	}
+	const auto &get()const {
+		return content;
+	}
+};
 enum class TOKEN {
 	T_EOF,
 	NUMBER,
 	RESERVED,
-	IDENT
+	IDENT,
+	STRING
 };
 class Token {
 private:
 public:
 	auto tokenize(std::string source) {
 		std::vector<std::pair<TOKEN, std::string> > data;
-		auto check = [&](auto t, auto r) {
+		auto check = [&](auto t, auto r,std::size_t group=0) {
 			std::smatch m;
 			if (!std::regex_search(source, m, r))return false;
-			data.push_back({ t,m[0].str() });
+			data.push_back({ t,m[group].str() });
 			source = source.substr(m[0].str().size());
 			return true;
 		};
 		for (; source.size();) {
-			if (check(TOKEN::NUMBER, std::regex(R"(^\d+)"))) {
-				continue;
-			}
-			else if (check(TOKEN::RESERVED, std::regex(R"(^(func|return|else|while|if|==|<=|>=|!=|[;{}+-/*\(\)=<>]))"))) {
-				continue;
-			}
-			else if (check(TOKEN::IDENT, std::regex(R"(^[a-zA-Z_][\w]*)"))) {//\s^/d
+			if (check(TOKEN::NUMBER, std::regex(R"(^\d+)"))||
+				check(TOKEN::RESERVED, std::regex(R"(^(func|return|else|while|if|==|<=|>=|!=|[;{}+-/*\(\)=<>]))"))||
+				//check(TOKEN::STRING, std::regex(R"(^".*?[^\\]")"))||
+				check(TOKEN::STRING,std::regex("^\"(.*?[^\\\\])\""),1)||
+				check(TOKEN::IDENT, std::regex(R"(^[a-zA-Z_][\w]*)"))
+				) {
 				continue;
 			}
 			source = source.substr(1);
@@ -224,7 +264,7 @@ class Operation {
 private:
 public:
 	OPERATION opCode;
-	std::vector<DWORD> operands;
+	std::vector<Any> operands;
 	Operation(decltype(opCode) opCode, decltype(operands) operands) :opCode(opCode), operands(operands) {
 
 	}
@@ -236,13 +276,13 @@ private:
 	std::vector<Operation> operations;
 	std::unordered_map<std::string, int> variables, functions;
 	std::unordered_map<int, int>  funcArg;
-	unsigned int offset, label, arg;
+	/*unsigned anyにしたらエラー吐く*/ int offset, label, arg;
 	bool isFuncFirst;
 	auto getVar(decltype(variables)::key_type variable) {
 		if (!variables.count(variable)) {
 			variables.emplace(variable, offset++);
 		}
-		operations.push_back(Operation(OPERATION::PUSH_I, { (DWORD)variables.at(variable) }));
+		operations.push_back(Operation(OPERATION::PUSH_I, { variables.at(variable) }));
 		return variables.at(variable);
 	}
 	auto getFunc(decltype(variables)::key_type funcname) {
@@ -255,14 +295,14 @@ public:
 	std::vector<Operation> codegen(Node node) {
 		switch (node.node) {
 		case NODE::NUMBER:
-			operations.push_back(Operation(OPERATION::PUSH_I, { (DWORD)node.value.get<int>() }));
+			operations.push_back(Operation(OPERATION::PUSH_I, { node.value }));
 			break;
 		case NODE::ADD:
 			codegen(node[Node::LEFT]);
 			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation(OPERATION::POP, { 0 }));
 			operations.push_back(Operation(OPERATION::POP, { 1 }));
-			operations.push_back(Operation(OPERATION::ADD, { 0,1 }));
+			operations.push_back(Operation(OPERATION::ADD, { 1,0 }));//0,1->string 逆になる
 			break;
 		case NODE::MUL:
 			codegen(node[Node::LEFT]);
@@ -389,7 +429,7 @@ public:
 			if (node[Node::LEFT].node == NODE::CALL) {
 				auto func = getFunc(node[Node::LEFT].value.get<std::string>());
 				scope = std::to_string(func);
-				operations.push_back(Operation(OPERATION::LABEL, { (DWORD)func }));
+				operations.push_back(Operation(OPERATION::LABEL, { func }));
 				codegen(node[Node::RIGHT]);
 			}
 			else {
@@ -397,7 +437,7 @@ public:
 				scope = std::to_string(func);
 				isFuncFirst = true;
 				codegen(node[Node::LEFT][Node::RIGHT]);
-				operations.push_back(Operation(OPERATION::LABEL, { (DWORD)func }));
+				operations.push_back(Operation(OPERATION::LABEL, { func }));
 				codegen(node[Node::RIGHT]);
 			}
 		}
@@ -407,7 +447,7 @@ public:
 			operations.push_back(Operation(OPERATION::RETURN, {}));//return value?
 			break;
 		case NODE::CALL:
-			operations.push_back(Operation(OPERATION::CALL, { (DWORD)getFunc(node.value.get<std::string>()) }));
+			operations.push_back(Operation(OPERATION::CALL, { getFunc(node.value.get<std::string>()) }));
 			break;
 		case NODE::ARGUMENT:
 			codegen(node[Node::LEFT]);
@@ -450,7 +490,7 @@ public:
 	}
 	std::vector<Operation> codegen(std::pair<bool, Node> nodes) {
 		codegen(nodes.second);
-		operations.emplace(operations.begin(), Operation(OPERATION::CALL, { (DWORD)getFunc("main") }));
+		operations.emplace(operations.begin(), Operation(OPERATION::CALL, { getFunc("main") }));
 		operations.emplace(std::next(operations.begin(), 1), Operation(OPERATION::EXIT, {}));
 		return operations;
 	}
@@ -464,75 +504,80 @@ public:
 };
 class VM {
 private:
-	std::stack<decltype(Operation::operands)::value_type> stack;
-	std::vector<DWORD> reg;
-	std::vector<DWORD> val;
+	std::stack<Any> stack;
+	class anyVec {
+	private:
+		std::vector<Any> any;
+	public:
+	};
+	std::vector<Any> reg;
+	std::vector<Any> val;
 public:
 	auto run(std::vector<Operation> code) {
 		std::unordered_map<int, decltype(code)::iterator > labels;
 		for (auto op = code.begin(); op != code.end(); ++op) {
 			if ((*op).opCode == OPERATION::LABEL) {
-				labels.insert_or_assign((*op).operands[0], op);
+				labels.insert_or_assign((*op).operands[0].get<int>(), op);
 			}
 		}
 		for (auto op = code.begin();
 			op->opCode != OPERATION::EXIT; ++op) {
 			switch (op->opCode) {
 			case OPERATION::PUSH:
-				stack.push(reg[op->operands[0]]);
+				stack.push(reg[op->operands[0].get<int>()]);
 				break;
 			case OPERATION::POP:
-				resizeAssign(reg, op->operands[0], stack.top());
+				resizeAssign(reg, op->operands[0].get<int>(), stack.top());
 				stack.pop();
 				break;
 			case OPERATION::ADD:
-				stack.push(reg[op->operands[0]] + reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] + reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::MUL:
-				stack.push(reg[op->operands[0]] * reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] * reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::SUB:
-				stack.push(reg[op->operands[0]] - reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] - reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::DIV:
-				stack.push(reg[op->operands[0]] / reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] / reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::PUSH_I:
 				stack.push(op->operands[0]);
 				break;
 			case OPERATION::STORE:
-				resizeAssign(val, reg[op->operands[0]], reg[op->operands[1]]);
+				resizeAssign(val, reg[op->operands[0].get<int>()].get<int>(), reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::LOAD:
-				resizeAssign(reg, op->operands[0], val[reg[op->operands[1]]]);
+				resizeAssign(reg, op->operands[0].get<int>(), val[reg[op->operands[1].get<int>()].get<int>()]);
 				break;
 			case OPERATION::EQUAL:
-				stack.push(reg[op->operands[0]] == reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] == reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::NOT_EQUAL:
-				stack.push(reg[op->operands[0]] != reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] != reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::LESS:
-				stack.push(reg[op->operands[0]] < reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] < reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::EQUAL_LESS:
-				stack.push(reg[op->operands[0]] <= reg[op->operands[1]]);
+				stack.push(reg[op->operands[0].get<int>()] <= reg[op->operands[1].get<int>()]);
 				break;
 			case OPERATION::JUMP:
-				op = labels[op->operands[0]];
+				op = labels[op->operands[0].get<int>()];
 				break;
 			case OPERATION::JZ:
-				if (reg[op->operands[0]])break;
-				op = labels[op->operands[1]];
+				if (reg[op->operands[0].get<int>()]!=Any(0))break;
+				op = labels[op->operands[1].get<int>()];
 				break;
 			case OPERATION::CALL:
-				stack.push(std::distance(code.begin(), op));
-				op = labels[op->operands[0]];
+				stack.push(op);
+				op = labels[op->operands[0].get<int>()];
 				break;
 			case OPERATION::RETURN:
 				resizeAssign(reg, 2, stack.top());
 				stack.pop();
-				op = std::next(code.begin(), stack.top());
+				op = stack.top().get<decltype(op)>();
 				stack.pop();
 				stack.push(reg[2]);
 				break;
@@ -650,13 +695,14 @@ public:
 };
 
 int main() {
-	auto data = Token().tokenize("func test(val,val2){return 100+val2};func main(){return test(1,2)}");
+	auto data = Token().tokenize(File("data.txt").get());
 	auto iter = data.begin();
 	BNF number([&] {
-		if (iter->first != TOKEN::NUMBER)return std::pair{ false,Node() };
+		if (iter->first != TOKEN::NUMBER&& iter->first != TOKEN::STRING)return std::pair{ false,Node() };
 		Node node;
 		node.node = NODE::NUMBER;
-		node.value = std::stoi((*iter).second);
+		if (iter->first == TOKEN::STRING)node.value = iter->second;
+		else node.value = std::stoi((*iter).second);
 		++iter;
 		return std::pair(true, node);
 		});
@@ -731,7 +777,7 @@ int main() {
 	Generator generator;
 	VM vm;
 	try {
-		std::cout << vm.run(generator.codegen(program()));
+		std::cout << vm.run(generator.codegen(program())).get<std::string>();
 	}
 	catch (std::string message) {
 		std::cout << message << std::endl;
