@@ -366,6 +366,23 @@ public:
 				operations.push_back(Operation(OPERATION::PUSH_I, { 0 }));
 				break;
 			}
+			else if (node[Node::RIGHT].node == NODE::VARIABLE && classes.count(scope+node[Node::RIGHT].value.get<std::string>())) {
+				classes.emplace(scope+node[Node::LEFT].value.get<std::string>(), classes.at(scope+node[Node::RIGHT].value.get<std::string>()));
+				for (auto& val : classVal.at(classes.at(scope + node[Node::RIGHT].value.get<std::string>()))) {
+					getVar(scope + node[Node::LEFT].value.get<std::string>() + "." + val);
+					getVar(scope + node[Node::RIGHT].value.get<std::string>() + "." + val);
+					operations.push_back(Operation{ OPERATION::POP, {0} });
+					operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
+					operations.push_back(Operation{ OPERATION::PUSH, {1} });
+					operations.push_back(Operation{ OPERATION::POP, {1} });
+					operations.push_back(Operation{ OPERATION::POP, {0} });
+					operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
+					operations.push_back(Operation{ OPERATION::PUSH, {1} });
+					operations.push_back(Operation{ OPERATION::POP, {0} });
+				}
+				operations.push_back(Operation(OPERATION::PUSH_I, { 0 }));
+				break;
+			}
 			else getVar(scope + node[Node::LEFT].value.get<std::string>());
 			codegen(node[Node::RIGHT]);
 			operations.push_back(Operation{ OPERATION::POP, {1} });
@@ -621,7 +638,7 @@ public:
 		
 			break;
 		case NODE::SELF:
-			getVar(className + node[Node::RIGHT].value.get<std::string>());//
+			getVar(className + "." + node[Node::RIGHT].value.get<std::string>());//
 			operations.push_back(Operation{ OPERATION::POP, {0} });
 			operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
 			operations.push_back(Operation{ OPERATION::PUSH, {1} });
