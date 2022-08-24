@@ -105,7 +105,7 @@ private:
 			return Implement<LessC<T> >()([](auto value, auto any) {return value < any.get<T>(); }, [](auto value, auto any) {return false; }, value, any);
 		}
 		std::string sstream()override {
-			return Implement<SstreamC<T> >()([](auto value) {std::stringstream ss; ss<< value; return ss.str(); }, [](auto value) {return ""; }, value);
+			return Implement<SstreamC<T> >()([](auto value) {std::stringstream ss; ss << value; return ss.str(); }, [](auto value) {return ""; }, value);
 		}
 	};
 	std::unique_ptr<Base> data;
@@ -144,10 +144,10 @@ public:
 		return any.data->less(*this);
 	}
 	auto operator<=(Any& any) {
-		return !((*this)>any);
+		return !((*this) > any);
 	}
 	auto operator>=(Any& any) {
-		return !(any<(*this));
+		return !(any < (*this));
 	}
 	auto operator!=(Any& any) {
 		return ((*this) < any) || (any < (*this));
@@ -158,7 +158,7 @@ public:
 		return (*this) != any;
 	}
 	auto operator==(Any& any) {
-		return !((* this) != any);
+		return !((*this) != any);
 	}
 	auto sstream() {
 		return data->sstream();
@@ -176,10 +176,10 @@ public:
 	File(std::string name) :content([&]()->std::string {
 		std::fstream file(name);
 		if (!file.is_open())return "";
-		return std::string(std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>());
+		return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 		}()) {
 	}
-	const auto &get()const {
+	const auto& get()const {
 		return content;
 	}
 };
@@ -195,7 +195,7 @@ private:
 public:
 	auto tokenize(std::string source) {
 		std::vector<std::pair<TOKEN, std::string> > data;
-		auto check = [&](auto t, auto r,std::size_t group=0) {
+		auto check = [&](auto t, auto r, std::size_t group = 0) {
 			std::smatch m;
 			if (!std::regex_search(source, m, r))return false;
 			data.push_back({ t,m[group].str() });
@@ -203,10 +203,10 @@ public:
 			return true;
 		};
 		for (; source.size();) {
-			if (check(TOKEN::NUMBER, std::regex(R"(^\d+)"))||
-				check(TOKEN::RESERVED, std::regex(R"(^(this|class|private|public|else if|func|return|else|while|if|==|<=|>=|!=|[:\.;{}+-/*\(\)=<>]))"))||
+			if (check(TOKEN::NUMBER, std::regex(R"(^\d+)")) ||
+				check(TOKEN::RESERVED, std::regex(R"(^(this|class|private|public|else if|func|return|else|while|if|==|<=|>=|!=|[:\.;{}+-/*\(\)=<>]))")) ||
 				//check(TOKEN::STRING, std::regex(R"(^".*?[^\\]")"))||
-				check(TOKEN::STRING,std::regex("^\"(.*?[^\\\\])\""),1)||
+				check(TOKEN::STRING, std::regex("^\"(.*?[^\\\\])\""), 1) ||
 				check(TOKEN::IDENT, std::regex(R"(^[a-zA-Z_][\w]*)"))
 				) {
 				continue;
@@ -283,7 +283,10 @@ enum class OPERATION {
 	EXIT,
 	RETURN,
 	CALL,
-	STD_STR_ERASE,
+	GROUP_LOAD,
+	GROUP_STORE,
+	GROUP_ASSIGN,
+	GROUP_RETURN,
 };
 class Operation {
 private:
@@ -301,11 +304,12 @@ private:
 	std::string className;
 	std::vector<Operation> operations;
 	std::unordered_map<std::string, int> variables, functions;
-	std::unordered_map<std::string, std::vector<std::string> > classVal,classFunc;//className->variables
+	std::unordered_map<std::string, std::vector<std::string> > classVal, classFunc;//className->variables
 	std::unordered_map<std::string, std::string> classes;//val->className
-	std::unordered_map<int, int>  funcArg;
-	int offset, label, arg;
-	bool isFuncFirst;
+	std::unordered_map<int, std::string >  funcArg;//func->firstArgName
+	int offset, label, arg,group;
+	std::unordered_map<std::string, int> classGroup;
+	std::unordered_map<std::string, int> groupOffset;
 	auto getVar(decltype(variables)::key_type variable) {
 		if (!variables.count(variable)) {
 			variables.emplace(variable, offset++);
@@ -354,52 +358,38 @@ public:
 			operations.push_back(Operation(OPERATION::DIV, { 1,0 }));
 			break;
 		case NODE::ASSIGN:
-			if (node[Node::LEFT].node == NODE::SELF) {
-				getVar(className + "." + node[Node::LEFT][Node::RIGHT].value.get<std::string>());
-			}
-			else if (node[Node::LEFT].node == NODE::MEMBER) {
-				//codegen(node[Node::LEFT]);
-				getVar(scope + node[Node::LEFT][Node::LEFT].value.get<std::string>() + "." + node[Node::LEFT][Node::RIGHT].value.get<std::string>());
-			}
-			else if (node[Node::RIGHT].node == NODE::VARIABLE && classVal.count(node[Node::RIGHT].value.get<std::string>())) {
-				classes.emplace(scope+node[Node::LEFT].value.get<std::string>(),node[Node::RIGHT].value.get<std::string>());
+			if (node[Node::RIGHT].node == NODE::VARIABLE && classVal.count(node[Node::RIGHT].value.get<std::string>())) {
+				classes.emplace(scope + node[Node::LEFT].value.get<std::string>(), node[Node::RIGHT].value.get<std::string>());
+				classGroup.emplace(scope + node[Node::LEFT].value.get<std::string>(),group++);
 				operations.push_back(Operation(OPERATION::PUSH_I, { 0 }));
 				break;
 			}
-			else if (node[Node::RIGHT].node == NODE::VARIABLE && classes.count(scope+node[Node::RIGHT].value.get<std::string>())) {
-				classes.emplace(scope+node[Node::LEFT].value.get<std::string>(), classes.at(scope+node[Node::RIGHT].value.get<std::string>()));
-				for (auto& val : classVal.at(classes.at(scope + node[Node::RIGHT].value.get<std::string>()))) {
-					getVar(scope + node[Node::LEFT].value.get<std::string>() + "." + val);
-					getVar(scope + node[Node::RIGHT].value.get<std::string>() + "." + val);
-					operations.push_back(Operation{ OPERATION::POP, {0} });
-					operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
-					operations.push_back(Operation{ OPERATION::PUSH, {1} });
-					operations.push_back(Operation{ OPERATION::POP, {1} });
-					operations.push_back(Operation{ OPERATION::POP, {0} });
-					operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
-					operations.push_back(Operation{ OPERATION::PUSH, {1} });
-					operations.push_back(Operation{ OPERATION::POP, {0} });
-				}
+			else if (node[Node::RIGHT].node == NODE::VARIABLE && classes.count(scope + node[Node::RIGHT].value.get<std::string>())) {
+				classGroup.emplace(scope + node[Node::LEFT].value.get<std::string>(), group++);
+				operations.push_back(Operation(OPERATION::GROUP_ASSIGN,{classGroup.at(scope + node[Node::LEFT].value.get<std::string>()),classGroup.at(scope + node[Node::RIGHT].value.get<std::string>()) }));
+				classes.emplace(scope + node[Node::LEFT].value.get<std::string>(), classes.at(scope + node[Node::RIGHT].value.get<std::string>()));
 				operations.push_back(Operation(OPERATION::PUSH_I, { 0 }));
 				break;
 			}
-			else getVar(scope + node[Node::LEFT].value.get<std::string>());
 			codegen(node[Node::RIGHT]);
-			operations.push_back(Operation{ OPERATION::POP, {1} });
-			operations.push_back(Operation{ OPERATION::POP, {0} });
-			operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
+			if (node[Node::LEFT].node == NODE::MEMBER&& classGroup.count(scope + node[Node::LEFT][Node::LEFT].value.get<std::string>())&& groupOffset.count(node[Node::LEFT][Node::RIGHT].value.get<std::string>())) {
+				operations.push_back(Operation{ OPERATION::POP, {1} });
+				operations.push_back(Operation(OPERATION::GROUP_STORE, { classGroup.at(scope + node[Node::LEFT][Node::LEFT].value.get<std::string>()),groupOffset.at(node[Node::LEFT][Node::RIGHT].value.get<std::string>()),1}));
+			}
+			else if(node[Node::LEFT].node == NODE::SELF&& classGroup.count(className)&& groupOffset.count(node[Node::LEFT][Node::RIGHT].value.get<std::string>())) {
+				operations.push_back(Operation{ OPERATION::POP, {1} });
+				operations.push_back(Operation(OPERATION::GROUP_STORE, { classGroup.at(className),groupOffset.at(node[Node::LEFT][Node::RIGHT].value.get<std::string>()),1}));
+			}
+			else if (node[Node::LEFT].node == NODE::VARIABLE) {
+				operations.push_back(Operation{ OPERATION::POP, {1} });
+				classGroup.emplace(scope + node[Node::LEFT].value.get<std::string>(), group++);
+				operations.push_back(Operation(OPERATION::GROUP_STORE, { classGroup.at(scope + node[Node::LEFT].value.get<std::string>()),0,1 }));
+			}
 			operations.push_back(Operation{ OPERATION::PUSH, {1} });
 			break;
 		case NODE::VARIABLE:
 		{
-			auto valOffset = getVar(scope + node.value.get<std::string>());//
-			if (isFuncFirst && !funcArg.count(valOffset)) {
-				isFuncFirst = false;
-				funcArg.emplace(std::stoi(scope), valOffset);
-
-			}
-			operations.push_back(Operation{ OPERATION::POP, {0} });
-			operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
+			operations.push_back(Operation(OPERATION::GROUP_LOAD, { 1,classGroup.at(scope + node.value.get<std::string>()),0 }));
 			operations.push_back(Operation{ OPERATION::PUSH, {1} });
 		}
 		break;
@@ -480,22 +470,24 @@ public:
 			codegen(node[Node::LEFT]);
 			codegen(node[Node::RIGHT]);
 			break;
-		case NODE::FUNCTION://ブロック以外を先読みする。
+		case NODE::FUNCTION:
 		{
 			if (node[Node::LEFT].node == NODE::CALL) {
 				auto func = getFunc(node[Node::LEFT].value.get<std::string>());
 				scope = std::to_string(func);
 				operations.push_back(Operation(OPERATION::LABEL, { func }));
 				codegen(node[Node::RIGHT]);
+				break;
 			}
-			else {
-				auto func = getFunc(node[Node::LEFT][Node::LEFT].value.get<std::string>());
-				scope = std::to_string(func);
-				isFuncFirst = true;
-				codegen(node[Node::LEFT][Node::RIGHT]);
-				operations.push_back(Operation(OPERATION::LABEL, { func }));
-				codegen(node[Node::RIGHT]);
+			auto func = getFunc(node[Node::LEFT][Node::LEFT].value.get<std::string>());
+			scope = std::to_string(func);
+			if (node[Node::LEFT][Node::RIGHT].node==NODE::VARIABLE) {
+				funcArg.emplace(std::stoi(scope), scope + node[Node::LEFT][Node::RIGHT].value.get<std::string>());
+				classGroup.emplace(scope + node[Node::LEFT][Node::RIGHT].value.get<std::string>(), group++);
 			}
+			else codegen(node[Node::LEFT][Node::RIGHT]);
+			operations.push_back(Operation(OPERATION::LABEL, { func }));
+			codegen(node[Node::RIGHT]);
 		}
 		break;
 		case NODE::RETURN:
@@ -506,60 +498,58 @@ public:
 			operations.push_back(Operation(OPERATION::CALL, { getFunc(node.value.get<std::string>()) }));
 			break;
 		case NODE::ARGUMENT:
-			codegen(node[Node::LEFT]);
-			codegen(node[Node::RIGHT]);
+		{
+			const auto registArg = [&](auto self,auto argument)->void {
+				if (argument.node == NODE::ARGUMENT) {
+					self(self,argument[Node::LEFT]);
+				}
+				else {
+					funcArg.emplace(std::stoi(scope),scope + argument.value.get<std::string>());
+					classGroup.emplace(scope + argument.value.get<std::string>(), group++);
+				}
+				if (argument[Node::RIGHT].node != NODE::VARIABLE)return;
+				classGroup.emplace(scope + argument[Node::RIGHT].value.get<std::string>(), group++);
+			};
+			registArg(registArg,node);
+		}
 			break;
 		case NODE::CALL_ARGUMENT:
 		{
-
-			const auto assign = [&](auto access) {
-				if (node[access].node == NODE::VARIABLE && classes.count(scope+node[access].value.get<std::string>())) {
-					for (auto& [name, offset] : variables) {
-						if (offset != (arg + funcArg.at(callScope))) continue;
-						classes.emplace(name,  classes.at(scope +node[access].value.get<std::string>()));
-						//node[access].value.get<std::string>() + ".";//+variables//元のクラス名
-						for (auto& val : classVal.at(classes.at(scope+node[access].value.get<std::string>()))) {
-							getVar(name + "." + val);
-							getVar(scope+ node[access].value.get<std::string>() + "." + val);
-							operations.push_back(Operation{ OPERATION::POP, {0} });
-							operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
-							operations.push_back(Operation{ OPERATION::PUSH, {1} });
-							operations.push_back(Operation{ OPERATION::POP, {1} });
-							operations.push_back(Operation{ OPERATION::POP, {0} });
-							operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
-							operations.push_back(Operation{ OPERATION::PUSH, {1} });
-							operations.push_back(Operation{ OPERATION::POP, {0} });
-						}
-						isFuncFirst = false;
-						return;
-					}
+			auto arg = 0;
+			const auto assignArg = [&](auto self, auto argument)->void {
+				if (argument.node == NODE::CALL_ARGUMENT) {
+					self(self, argument[Node::LEFT]);
+				}//memberが来ている.
+				else if(argument.node==NODE::MEMBER) {
+					operations.push_back(Operation(OPERATION::GROUP_LOAD, {1,classGroup.at(scope+argument[Node::LEFT].value.get<std::string>()),groupOffset.at(argument[Node::RIGHT].value.get<std::string>())}));
+					operations.push_back(Operation(OPERATION::GROUP_STORE, { (arg++) + classGroup.at(funcArg.at(getFunc(node[Node::LEFT].value.get<std::string>()))),0,1 }));
 					return;
 				}
-				operations.push_back(Operation(OPERATION::PUSH_I, { arg + funcArg.at(callScope) }));
-				codegen(node[access]);
-				operations.push_back(Operation{ OPERATION::POP, {1} });
-				operations.push_back(Operation{ OPERATION::POP, {0} });
-				operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
-				operations.push_back(Operation{ OPERATION::PUSH, {1} });
-				operations.push_back(Operation{ OPERATION::POP, {0} });
-			};
-			if (node[Node::LEFT].node == NODE::CALL) {
-				callScope = getFunc(node[Node::LEFT].value.get<std::string>());
-				if (node[Node::RIGHT].node != NODE::CALL_ARGUMENT) {
-					assign(Node::RIGHT);
+				else if (argument.node == NODE::NUMBER) {
+					codegen(argument);
+					operations.push_back(Operation{ OPERATION::POP,{0} });
+					operations.push_back(Operation(OPERATION::GROUP_STORE, { (arg++) + classGroup.at(funcArg.at(getFunc(node[Node::LEFT].value.get<std::string>()))),0,0 }));
+					return;
 				}
-				else codegen(node[Node::RIGHT]);
-				codegen(node[Node::LEFT]);
-				arg = 0;
-				break;
-			}
-			else if (node[Node::LEFT].node != NODE::CALL_ARGUMENT) {
-				assign(Node::LEFT);
-			}
-			else codegen(node[Node::LEFT]);
-			++arg;
-			assign(Node::RIGHT);
-
+				else {
+					operations.push_back(Operation(OPERATION::GROUP_ASSIGN, { (arg++) + classGroup.at(funcArg.at(getFunc(node[Node::LEFT].value.get<std::string>()))),classGroup.at(scope + argument.value.get<std::string>()) }));
+				}
+				if (argument[Node::RIGHT].node == NODE::MEMBER) {
+					operations.push_back(Operation(OPERATION::GROUP_LOAD, { 1,classGroup.at(scope + argument[Node::RIGHT][Node::LEFT].value.get<std::string>()),groupOffset.at(argument[Node::RIGHT][Node::RIGHT].value.get<std::string>()) }));
+					operations.push_back(Operation(OPERATION::GROUP_STORE, { (arg++) + classGroup.at(funcArg.at(getFunc(node[Node::LEFT].value.get<std::string>()))),0,1 }));
+					return;
+				}
+				else if (argument[Node::RIGHT].node == NODE::NUMBER) {
+					codegen(argument[Node::RIGHT]);
+					operations.push_back(Operation{ OPERATION::POP,{0} });
+					operations.push_back(Operation(OPERATION::GROUP_STORE, { (arg++) + classGroup.at(funcArg.at(getFunc(node[Node::LEFT].value.get<std::string>()))),0,0 }));
+					return;
+				}
+				else if (argument[Node::RIGHT].node != NODE::VARIABLE)return;
+				operations.push_back(Operation(OPERATION::GROUP_ASSIGN, { (arg++) + classGroup.at(funcArg.at(getFunc(node[Node::LEFT].value.get<std::string>()))),classGroup.at(scope + argument[Node::RIGHT].value.get<std::string>())}));
+			};
+			assignArg(assignArg, node[Node::RIGHT]);
+			codegen(node[Node::LEFT]);
 		}
 		break;
 		case NODE::CLASS:
@@ -567,10 +557,12 @@ public:
 			className = node[Node::LEFT].value.get<std::string>();
 			classVal.emplace(node[Node::LEFT].value.get<std::string>(), std::vector<std::string>{});
 			classFunc.emplace(node[Node::LEFT].value.get<std::string>(), std::vector<std::string>{});
+			classGroup.emplace(className,group++);
+			auto gOffset = 0;
 			const auto pushBack = [&](auto self, auto val) {
-				if (val.node == NODE::FUNCTION&& val[Node::RIGHT][Node::LEFT].node==NODE::CALL) {
+				if (val.node == NODE::FUNCTION && val[Node::RIGHT][Node::LEFT].node == NODE::CALL) {
 					classFunc.at(node[Node::LEFT].value.get<std::string>()).push_back(val[Node::RIGHT][Node::LEFT].value.get<std::string>());
-					val[Node::RIGHT][Node::LEFT].value = node[Node::LEFT].value.get<std::string>()+"."+val[Node::RIGHT][Node::LEFT].value.get<std::string>();
+					val[Node::RIGHT][Node::LEFT].value = node[Node::LEFT].value.get<std::string>() + "." + val[Node::RIGHT][Node::LEFT].value.get<std::string>();
 					codegen(val[Node::RIGHT]);
 				}
 				else if (val.node == NODE::FUNCTION && val[Node::RIGHT][Node::LEFT].node == NODE::ARGUMENT) {
@@ -579,68 +571,47 @@ public:
 					codegen(val[Node::RIGHT]);
 				}
 				else {
+					groupOffset.emplace(val.value.get<std::string>(),gOffset);
+					groupOffset.emplace(className, gOffset++);
 					classVal.at(node[Node::LEFT].value.get<std::string>()).push_back(val.value.get<std::string>());
-					getVar(node[Node::LEFT].value.get<std::string>()+"."+val.value.get<std::string>());
+					getVar(node[Node::LEFT].value.get<std::string>() + "." + val.value.get<std::string>());
 				}
 				if (!val.size())return;
 				self(self, val[Node::LEFT]);
 			};
 			pushBack(pushBack, node[Node::RIGHT]);
 		}
-			
-			break;
+
+		break;
 		case NODE::MEMBER:
 		{
-			const auto classCopy = [&](auto val,bool reverce) {//もう少し汎用的にしたらすっきりする。
-				if (!reverce) {
-					getVar(classes.at(scope+node[Node::LEFT].value.get<std::string>()) + "." + val);
-					getVar(scope + node[Node::LEFT].value.get<std::string>() + "." + val);
-				}
-				else {
-					getVar(scope + node[Node::LEFT].value.get<std::string>() + "." + val);
-					getVar(classes.at(scope+node[Node::LEFT].value.get<std::string>()) + "." + val);
-				}
-				operations.push_back(Operation{ OPERATION::POP, {0} });
-				operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
-				operations.push_back(Operation{ OPERATION::PUSH, {1} });
-				operations.push_back(Operation{ OPERATION::POP, {1} });
-				operations.push_back(Operation{ OPERATION::POP, {0} });
-				operations.push_back(Operation{ OPERATION::STORE, {0,1 } });
-				operations.push_back(Operation{ OPERATION::PUSH, {1} });
-				operations.push_back(Operation{ OPERATION::POP, {0} });
-			};
-			const auto copyChanged = [&] {
-				for (auto& val : classVal.at(classes.at(scope + node[Node::LEFT].value.get<std::string>()))) {
-					classCopy(val, false);
-				}
-				codegen(node[Node::RIGHT]);//
-				for (auto& val : classVal.at(classes.at(scope + node[Node::LEFT].value.get<std::string>()))) {
-					classCopy(val, true);
-				}
-			};
-			if (node[Node::RIGHT].node == NODE::CALL && classes.count(scope+node[Node::LEFT].value.get<std::string>()) && classFunc.count(classes.at(scope + node[Node::LEFT].value.get<std::string>()))) {
+			if (node[Node::RIGHT].node == NODE::CALL && classes.count(scope + node[Node::LEFT].value.get<std::string>()) && classFunc.count(classes.at(scope + node[Node::LEFT].value.get<std::string>()))) {
 				node[Node::RIGHT].value = classes.at(scope + node[Node::LEFT].value.get<std::string>()) + "." + node[Node::RIGHT].value.get<std::string>();
-				copyChanged();
+				operations.push_back(Operation(OPERATION::GROUP_ASSIGN, { classGroup.at(className),classGroup.at(scope + node[Node::LEFT].value.get<std::string>()) }));
+				codegen(node[Node::RIGHT]);
+				operations.push_back(Operation(OPERATION::GROUP_ASSIGN, { classGroup.at(scope + node[Node::LEFT].value.get<std::string>()),classGroup.at(className) }));
 				break;
 			}
 			else if (node[Node::RIGHT].node == NODE::CALL_ARGUMENT && classes.count(scope + node[Node::LEFT].value.get<std::string>()) && classFunc.count(classes.at(scope + node[Node::LEFT].value.get<std::string>()))) {
 				node[Node::RIGHT][Node::LEFT].value = classes.at(scope + node[Node::LEFT].value.get<std::string>()) + "." + node[Node::RIGHT][Node::LEFT].value.get<std::string>();
-				copyChanged();
+				operations.push_back(Operation(OPERATION::GROUP_ASSIGN, { classGroup.at(className),classGroup.at(scope + node[Node::LEFT].value.get<std::string>()) }));
+				codegen(node[Node::RIGHT]);
+				operations.push_back(Operation(OPERATION::GROUP_ASSIGN, { classGroup.at(scope + node[Node::LEFT].value.get<std::string>()),classGroup.at(className) }));
 				break;
-			}//else ifなくてもいい下のやつ.
-			else if (node[Node::RIGHT].node == NODE::VARIABLE && classes.count(scope+node[Node::LEFT].value.get<std::string>()) && classVal.count(classes.at(scope + node[Node::LEFT].value.get<std::string>()))) {
-				node.value = (node[Node::LEFT].value.get<std::string>() + "." + node[Node::RIGHT].value.get<std::string>());
-				node.node = NODE::VARIABLE;
-				codegen(node);
+			}
+			else if (node[Node::RIGHT].node == NODE::VARIABLE&& classGroup.count(scope + node[Node::LEFT].value.get<std::string>())&& groupOffset.count(node[Node::RIGHT].value.get<std::string>())) {
+				operations.push_back(Operation(OPERATION::GROUP_LOAD, { 1,classGroup.at(scope + node[Node::LEFT].value.get<std::string>()),groupOffset.at(node[Node::RIGHT].value.get<std::string>())}));
+				operations.push_back(Operation{ OPERATION::PUSH, {1} });
 				break;
 			}
 		}
-		
-			break;
+
+		break;
 		case NODE::SELF:
-			getVar(className + "." + node[Node::RIGHT].value.get<std::string>());//
-			operations.push_back(Operation{ OPERATION::POP, {0} });
-			operations.push_back(Operation{ OPERATION::LOAD, {1,0} });
+			if (!groupOffset.count(node[Node::RIGHT].value.get<std::string>())) {
+				break;
+			}
+			operations.push_back(Operation(OPERATION::GROUP_LOAD,{1,classGroup.at(className),groupOffset.at(node[Node::RIGHT].value.get<std::string>())}));
 			operations.push_back(Operation{ OPERATION::PUSH, {1} });
 			break;
 		}
@@ -649,7 +620,7 @@ public:
 	}
 	std::vector<Operation> codegen(std::pair<bool, Node> nodes) {
 		codegen(nodes.second);
-		operations.clear();//これだと、offsetとかが更新されず最大値になってるから
+		operations.clear();
 		codegen(nodes.second);
 		operations.emplace(operations.begin(), Operation(OPERATION::CALL, { getFunc("main") }));
 		operations.emplace(std::next(operations.begin(), 1), Operation(OPERATION::EXIT, {}));
@@ -660,13 +631,34 @@ public:
 class VM {
 private:
 	std::stack<Any> stack;
-	class anyVec {
+	template <class T>
+	class resizeVector {
 	private:
-		std::vector<Any> any;
+		std::vector<T> vec;
+		auto size() {
+			return vec.size();
+		}
 	public:
+		auto &operator[](int index) {
+			if (vec.size() <= index) {
+				vec.resize(index+1);
+			}
+			return vec[index];
+		}
+		auto operator=(resizeVector<T> target) {
+			vec.resize(target.size());
+			std::ranges::copy(target,vec.begin());
+		}
+		auto begin() {
+			return vec.begin();
+		}
+		auto end() {
+			return vec.end();
+		}
 	};
-	std::vector<Any> reg;
-	std::vector<Any> val;
+	resizeVector<Any> reg;
+	resizeVector<Any> val;
+	resizeVector<resizeVector<Any> > group;//group[0]は一時的に使用する　値渡しとかメンバーのやつとか
 public:
 	auto run(std::vector<Operation> code) {
 		std::unordered_map<int, decltype(code)::iterator > labels;
@@ -676,14 +668,13 @@ public:
 			}
 		}
 		for (auto op = code.begin();
-
 			op->opCode != OPERATION::EXIT; ++op) {
 			switch (op->opCode) {
 			case OPERATION::PUSH:
 				stack.push(reg[op->operands[0].get<int>()]);
 				break;
 			case OPERATION::POP:
-				resizeAssign(reg, op->operands[0].get<int>(), stack.top());
+				reg[op->operands[0].get<int>()] = stack.top();
 				stack.pop();
 				break;
 			case OPERATION::ADD:
@@ -702,10 +693,10 @@ public:
 				stack.push(op->operands[0]);
 				break;
 			case OPERATION::STORE:
-				resizeAssign(val, reg[op->operands[0].get<int>()].get<int>(), reg[op->operands[1].get<int>()]);
+				val[reg[op->operands[0].get<int>()].get<int>()] = reg[op->operands[1].get<int>()];
 				break;
 			case OPERATION::LOAD:
-				resizeAssign(reg, op->operands[0].get<int>(), val[reg[op->operands[1].get<int>()].get<int>()]);
+				reg[op->operands[0].get<int>()] = val[reg[op->operands[1].get<int>()].get<int>()];
 				break;
 			case OPERATION::EQUAL:
 				stack.push(reg[op->operands[0].get<int>()] == reg[op->operands[1].get<int>()]);
@@ -722,7 +713,7 @@ public:
 			case OPERATION::JUMP:
 				op = labels[op->operands[0].get<int>()];
 				break;
-			case OPERATION::JZ: 
+			case OPERATION::JZ:
 				if (reg[op->operands[0].get<int>()].get<bool>())break;//キャスト演算子をオーバーライドしてやればget<bool>いらない
 				op = labels[op->operands[1].get<int>()];
 				break;
@@ -732,13 +723,21 @@ public:
 				op = labels[op->operands[0].get<int>()];
 				break;
 			case OPERATION::RETURN:
-				resizeAssign(reg, 2, stack.top());
+				reg[2] = stack.top();
 				stack.pop();
 				op = stack.top().get<decltype(op)>();
 				stack.pop();
 				stack.push(reg[2]);
 				break;
-
+			case OPERATION::GROUP_ASSIGN:
+				group[op->operands[0].get<int>()] = group[op->operands[1].get<int>()];
+				break;
+			case OPERATION::GROUP_LOAD:
+				reg[op->operands[0].get<int>()] = group[op->operands[1].get<int>()][op->operands[2].get<int>()];
+				break;
+			case OPERATION::GROUP_STORE:
+				group[op->operands[0].get<int>()][op->operands[1].get<int>()]=reg[op->operands[2].get<int>()];
+				break;
 			}
 		}
 		return reg[2];
@@ -855,10 +854,10 @@ int main() {
 	//std::cout << source;
 	//system("pause");
 	//auto data = Token().tokenize(std::regex_replace(source, std::regex(R"(\n)"), ""));
-	auto data = Token().tokenize(std::regex_replace(File("data.txt").get(),std::regex(R"(\n)"),""));
+	auto data = Token().tokenize(std::regex_replace(File("data.txt").get(), std::regex(R"(\n)"), ""));
 	auto iter = data.begin();
 	BNF number([&] {
-		if (iter->first != TOKEN::NUMBER&& iter->first != TOKEN::STRING)return std::pair{ false,Node() };
+		if (iter->first != TOKEN::NUMBER && iter->first != TOKEN::STRING)return std::pair{ false,Node() };
 		Node node;
 		node.node = NODE::NUMBER;
 		if (iter->first == TOKEN::STRING)node.value = iter->second;
@@ -879,7 +878,7 @@ int main() {
 		return std::pair(true, node);
 		});
 	Expression e;
-	BNF program, mul, add, primary, expr, compare, ifExpr, whileExpr, block, ret, call, function,member,registClass,self;//menber function? menber variable?????
+	BNF program, mul, add, primary, expr, compare, ifExpr, whileExpr, block, ret, call, function, member, registClass, self;//menber function? menber variable?????
 	BNF unary([&] {
 		if (iter->second == "+") {
 			++iter;
@@ -917,7 +916,7 @@ int main() {
 		return bnf();
 		});
 	block = BNF([&] {
-		static auto bnf = e.expect(iter, e.link(iter, "{", e.regist(NODE::BLOCK,e.loop(e.expect(iter,expr,";"), e.regist(NODE::BLOCK, e.expect(iter, expr, ";"))))), "}");
+		static auto bnf = e.expect(iter, e.link(iter, "{", e.regist(NODE::BLOCK, e.loop(e.expect(iter, expr, ";"), e.regist(NODE::BLOCK, e.expect(iter, expr, ";"))))), "}");
 		return bnf();
 		});
 	call = BNF([&] {
@@ -928,16 +927,16 @@ int main() {
 		static auto bnf = e.link(iter, "return", e.regist(NODE::RETURN, expr));
 		return bnf();
 		});
-	member = e.link(iter, e.expect(iter, ident, "."), e.regist(NODE::MEMBER, e._or(call, ident)));
-	self = e.link(iter,"this",e.link(iter,".",e.regist(NODE::SELF,e._or(call,ident))));
+	member = e.link(iter, e.expect(iter, e._or(call, ident), "."), e.regist(NODE::MEMBER, e.loop(e._or(call, ident),e.regist(NODE::MEMBER,e.link(iter,".",e._or(call,ident))) )));
+	self = e.link(iter, "this", e.link(iter, ".", e.regist(NODE::SELF, e._or(call, ident))));
 	primary = e._or(e._or(e._or(e.expect(iter, e.link(iter, "(", compare), ")"), call), e._or(self, e._or(member, ident))), number);
 	function = BNF([&] {
 		static auto bnf = e.link(iter, e.ifAny(e.link(iter, "func", e.expect(iter, ident, "(")), e.regist(NODE::ARGUMENT, e.loop(expr, e.link(iter, ",", e.regist(NODE::ARGUMENT, expr))))), e.link(iter, ")", e.regist(NODE::FUNCTION, block)));
 		return bnf();
 		});
-	registClass =e.expect(iter, e.link(iter,e.expect(iter,e.link(iter,"class",ident),"{"),e.regist(NODE::CLASS,e.loop(e.loop(e.expect(iter,ident,";"), e.expect(iter, ident, ";")),e.regist(NODE::FUNCTION,function)))), "}");
-	expr = e._or(e._or(e._or(e._or(e._or(e.link(iter, e._or(self,e._or(member,ident)), e.regist(NODE::ASSIGN, e.link(iter, "=", compare))), whileExpr), ifExpr), ret), block), compare);
-	program = e.loop(e._or(registClass,function), e.regist(NODE::PROGRAM, e._or(registClass, function)));
+	registClass = e.expect(iter, e.link(iter, e.expect(iter, e.link(iter, "class", ident), "{"), e.regist(NODE::CLASS, e.loop(e.loop(e.expect(iter, ident, ";"), e.expect(iter, ident, ";")), e.regist(NODE::FUNCTION, function)))), "}");
+	expr = e._or(e._or(e._or(e._or(e._or(e.link(iter, e._or(self, e._or(member, ident)), e.regist(NODE::ASSIGN, e.link(iter, "=", compare))), whileExpr), ifExpr), ret), block), compare);
+	program = e.loop(e._or(registClass, function), e.regist(NODE::PROGRAM, e._or(registClass, function)));
 	Generator generator;
 	VM vm;
 	std::cout << vm.run(generator.codegen(program())).sstream();
