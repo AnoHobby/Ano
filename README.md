@@ -1,2 +1,3 @@
 # forcibly
-script language.
+プログラミング言語もどき  
+その名の通り、無理やり実装しています.
