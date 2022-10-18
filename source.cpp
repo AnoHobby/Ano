@@ -7,11 +7,11 @@
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/Support/TargetSelect.h"
+#include <stack>
 #include <memory>
 #include <string>
 #include <functional>
 #include <iostream>
-#include <any>
 #include <regex>
 #include <unordered_map>
 enum class TOKEN {
@@ -37,7 +37,7 @@ public:
 			};
 			if (
 				check(TOKEN::NUMBER, R"(^\d+)") ||
-				check(TOKEN::RESERVED, R"(^([;,\.\(\)+=\-<>{}]))") ||
+				check(TOKEN::RESERVED, R"(^([;,\.\(\)+*/=\-<>{}]))") ||
 				check(TOKEN::IDENT, R"(^[a-zA-Z_][\w]*)") ||
 				check(TOKEN::STRING, "^\".*?[^\\\\]\"")
 				) {
@@ -63,10 +63,12 @@ enum class NODE {
 	VARIABLE,
 	ASSIGN,
 	IF,
-	DECLARE,
-	LOAD,
 	WHILE,
-	LESS
+	LESS,
+	DECLARE_AUTO,
+	SUB,
+	MUL,
+	DIV
 };
 class Node {
 private:
@@ -194,7 +196,7 @@ private:
 	llvm::LLVMContext context;
 	std::unique_ptr<llvm::Module> mainModule;
 	llvm::IRBuilder<> builder;
-	std::unordered_map<std::string, llvm::Value*> variables;//variable name->obj
+	std::unordered_map<std::string, std::pair<llvm::Value*,llvm::Type*> > variables;//variable name->obj
 public:
 	Generator() :
 		mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
@@ -204,17 +206,21 @@ public:
 	}
 	llvm::Value *codegen(Node node) {
 		switch (node.node) {
-		case NODE::BLOCK:
+		case NODE::BLOCK: 
+		{
+			llvm::Value* lresult;
 			for (const auto& child : node.branch) {
-				codegen(child);
+				lresult=codegen(child);
 			}
+			return lresult;
+		}
 			break;
 		case NODE::EXTERN:
 			mainModule->getOrInsertFunction(
 				node.branch[0/*function name*/].value,//function name
 				llvm::FunctionType::get(llvm::Type::getDoubleTy(context),//return type
 					llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy()))
-					, false));//可変長
+					, false));//�ϒ�
 			break;
 		case NODE::FUNCTION:
 			variables.clear();
@@ -224,8 +230,13 @@ public:
 						llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy())), false),
 					llvm::Function::ExternalLinkage, node.branch[0/*function name*/].value, *mainModule)
 			));
+
 			for (auto i=0; auto & arg : mainModule->getFunction(node.branch[0].value)->args()) {
-				variables.emplace(node.branch[1].branch[i].branch[1].value, &arg);
+				variables.emplace(
+					node.branch[1].branch[i].branch[1].value,
+					std::pair{ builder.CreateAlloca(arg.getType(),nullptr,node.branch[1].branch[i].branch[1].value),arg.getType()}
+				);
+				builder.CreateStore(&arg,variables[node.branch[1].branch[i].branch[1].value].first);
 			}
 			codegen(node.branch[2/*block*/]);
 			break;
@@ -238,19 +249,30 @@ public:
 		case NODE::ADD:
 			return builder.CreateFAdd(codegen(node.branch[0]), codegen(node.branch[1]), "addtmp");
 			break;
-		case NODE::LOAD:
-			return builder.CreateLoad(builder.getDoubleTy(), codegen(node.branch[0/*expression*/]));
+		case NODE::MUL:
+			return builder.CreateFMul(codegen(node.branch[0]), codegen(node.branch[1]), "multmp");
+			break;
+		case NODE::DIV:
+			return builder.CreateFDiv(codegen(node.branch[0]), codegen(node.branch[1]), "divtmp");
+			break;
+		case NODE::SUB:
+			return builder.CreateFSub(codegen(node.branch[0]), codegen(node.branch[1]), "subtmp");
 			break;
 		case NODE::VARIABLE:
-			//return builder.CreateLoad(builder.getDoubleTy(), variables[node.value]);
-			return variables[node.value];
+			return builder.CreateLoad(variables[node.value].second, variables[node.value].first);
 			break;
 		case NODE::ASSIGN:
-			return builder.CreateStore(codegen(node.branch[1]),codegen(node.branch[0]));
+			return builder.CreateStore(codegen(node.branch[1]),variables[node.branch[0].value].first);
 			break;
-		case NODE::DECLARE:
-			variables.emplace(node.branch[1].branch[0].value,builder.CreateAlloca(builder.getDoubleTy(), nullptr, node.branch[1].branch[0].value));
-			return codegen(node.branch[1]);
+		case NODE::DECLARE_AUTO:
+		{
+			auto *value=codegen(node.branch[1]);
+			variables.emplace(
+				node.branch[0].value,
+				std::pair(builder.CreateAlloca(value->getType(), nullptr, node.branch[0].value),value->getType())
+			);
+			return builder.CreateStore(value, variables[node.branch[0].value].first);
+		}
 			break;
 		case NODE::LESS:
 			return builder.CreateUIToFP(builder.CreateFCmpULT(codegen(node.branch[0]), codegen(node.branch[1]), "compareTemp"),builder.getDoubleTy(), "boolTemp");
@@ -291,21 +313,19 @@ public:
 			zero.node = NODE::NUMBER;
 			auto* function = builder.GetInsertBlock()->getParent();
 			auto* loop = llvm::BasicBlock::Create(context, "loop", function);
-			auto* after = llvm::BasicBlock::Create(context,"afterLoop");
-			builder.CreateCondBr(
-				builder.CreateFCmpONE(codegen(node.branch[0]), codegen(zero), "loop"),
-				loop,
-				after
-			);
+			auto* then = llvm::BasicBlock::Create(context, "then", function);
+			auto* after = llvm::BasicBlock::Create(context,"afterLoop",function);
+			//function->getBasicBlockList().push_back(after);
+			builder.CreateBr(loop);
 			builder.SetInsertPoint(loop);
-			codegen(node.branch[1]);
 			builder.CreateCondBr(
-				builder.CreateFCmpONE(codegen(node.branch[0]), codegen(zero), "loop"),
-				loop,
+				builder.CreateFCmpONE(codegen(node.branch[0]), codegen(zero), "loopCond"),
+				then,
 				after
 			);
-
-			function->getBasicBlockList().push_back(after);
+			builder.SetInsertPoint(then);
+			codegen(node.branch[1]);
+			builder.CreateBr(loop);
 			builder.SetInsertPoint(after);
 		}
 			break;
@@ -315,7 +335,7 @@ public:
 			for (auto i = 0; auto & arg:args) {
 				arg = codegen(node.branch[1].branch[i]);
 			}
-			return builder.CreateCall(mainModule->getFunction(any_cast<std::string>(node.branch[0].value)), args);
+			return builder.CreateCall(mainModule->getFunction(node.branch[0].value), args);
 		}
 			break;
 		}
@@ -343,21 +363,23 @@ public:
 	}
 };
 int main() {
-	auto tokens = Lexer().tokenize("fn main(){double x=0;while x.load<10{x=x.load+1;};return x.load;}");
+	auto tokens = Lexer().tokenize("fn test(double x){x=x+1;return x;}fn main(){return test(1);}");
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
-	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
 	BNF expr;
-	auto load = (variable.push() + BNF(".") + BNF("load")).regist(NODE::LOAD);
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
-	auto add = (number|call|load|variable).push() + (BNF("+") + (*expr).push().regist(NODE::ADD)).loop().regist(NODE::ADD);
-	auto less = ((add|number | call | load | variable).push() + BNF("<") + (*expr).push()).regist(NODE::LESS);
-	auto assign = ((variable|call).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
-	BNF ret,ifExpr,forExpr,whileExpr;
-	auto declare = (BNF(TOKEN::IDENT).push() + assign.push()).regist(NODE::DECLARE);
-	expr =  add|less|number|*ret|call|*ifExpr|*forExpr|*whileExpr|declare|load|assign|variable;
+	BNF mul, add;
+	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);
+	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + compare.push()).regist(NODE::DECLARE_AUTO);
+	auto assign = ((*add).push() + BNF("=") + (*add).push()).regist(NODE::ASSIGN);
+	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
+	auto primary = BNF("(")+(*compare).expect(BNF(")")) | number|call|variable;
+	mul = (primary.push()+(BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
+	add =( mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
+	BNF ret, ifExpr, forExpr, whileExpr, block;
+	expr =(*ret) |let|*whileExpr|assign|compare;
 	ret = (BNF("return") + expr.push()).regist(NODE::RETURN);
-	auto block = (BNF("{") + expr.expect(BNF(";")).push().loop() + BNF("}")).regist(NODE::BLOCK);
+	block = (BNF("{") + expr.expect(BNF(";")).push().loop() + BNF("}")).regist(NODE::BLOCK);
 	ifExpr = ((BNF("if")+expr.push() + block.push()).push()[(BNF("else") + BNF("if") + expr.push() + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
 	whileExpr = (BNF("while") + expr.push() + block.push()).regist(NODE::WHILE);
 	auto externFunc = (BNF("extern") + BNF(TOKEN::IDENT).push() + BNF("(")[BNF(TOKEN::IDENT).push()[BNF(",")].loop()].push() + BNF(")") + BNF(";")).regist(NODE::EXTERN);
