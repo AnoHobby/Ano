@@ -68,7 +68,9 @@ enum class NODE {
 	DECLARE_AUTO,
 	SUB,
 	MUL,
-	DIV
+	DIV,
+	INT,
+	FLOATING_POINT,
 };
 class Node {
 private:
@@ -189,14 +191,15 @@ public:
 			ifAny.branch.insert(ifAny.branch.begin(), node.branch.begin(), node.branch.end());
 			return ifAny;
 			});
-	}
+	}//auto func(NODE) if parser(node).node=argumentNode->lresult.node=argNode
 };
 class Generator {
 private:
 	llvm::LLVMContext context;
 	std::unique_ptr<llvm::Module> mainModule;
 	llvm::IRBuilder<> builder;
-	std::unordered_map<std::string, std::pair<llvm::Value*,llvm::Type*> > variables;//variable name->obj
+	std::unordered_map<std::string, llvm::AllocaInst*> variables;//variable name->{variable,valueType}
+	llvm::Type* retType;
 public:
 	Generator() :
 		mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
@@ -223,28 +226,49 @@ public:
 					, false));//‰Â•Ï’·
 			break;
 		case NODE::FUNCTION:
-			variables.clear();
-			builder.SetInsertPoint(llvm::BasicBlock::Create(context, "entry",
-				llvm::Function::Create(
-					llvm::FunctionType::get(llvm::Type::getDoubleTy(context),
-						llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy())), false),
-					llvm::Function::ExternalLinkage, node.branch[0/*function name*/].value, *mainModule)
-			));
-
-			for (auto i=0; auto & arg : mainModule->getFunction(node.branch[0].value)->args()) {
-				variables.emplace(
-					node.branch[1].branch[i].branch[1].value,
-					std::pair{ builder.CreateAlloca(arg.getType(),nullptr,node.branch[1].branch[i].branch[1].value),arg.getType()}
-				);
-				builder.CreateStore(&arg,variables[node.branch[1].branch[i].branch[1].value].first);
-			}
-			codegen(node.branch[2/*block*/]);
+		{
+			auto createFunction = [&]() {
+				variables.clear();
+				builder.SetInsertPoint(llvm::BasicBlock::Create(context, "entry",
+					llvm::Function::Create(
+						llvm::FunctionType::get(retType,//retType=builder.getVoidTy(),
+							llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy())), false),
+						llvm::Function::ExternalLinkage, node.branch[0/*function name*/].value, *mainModule)
+				));
+				for (auto i = 0; auto & arg : mainModule->getFunction(node.branch[0/*function name*/].value)->args()) {
+					variables.emplace(
+						node.branch[1].branch[i].branch[1].value,
+						builder.CreateAlloca(arg.getType(), nullptr, node.branch[1].branch[i].branch[1].value)
+					);
+					builder.CreateStore(&arg, variables[node.branch[1].branch[i].branch[1].value]);
+				}
+				codegen(node.branch[2/*block*/]);
+			};
+			retType = builder.getVoidTy();
+			createFunction();
+			mainModule->getFunction(node.branch[0].value)->eraseFromParent();
+			createFunction();
+		}
 			break;
 		case NODE::RETURN:
-			builder.CreateRet(codegen(node.branch[0/*expression*/]));
+		{
+			auto*value = codegen(node.branch[0/*expression*/]);
+			retType = value->getType();//todo:Œp³‚Ì“x‡‚¢‚ªˆê”Ô‚‚¢‚Ì‚ð•Ô‚è’l‚É‚·‚é
+			builder.CreateRet(value);
+		}
 			break;
-		case NODE::NUMBER:
-			return llvm::ConstantFP::get(context, llvm::APFloat(std::stod(node.value)));
+		case NODE::FLOATING_POINT:
+			return llvm::ConstantFP::get(context, llvm::APFloat(std::stod(node.branch[0].value+"."+node.branch[1].value)));
+			break;
+		case NODE::INT:
+			return llvm::ConstantInt::get(
+				context,
+				llvm::APInt(
+					std::stoi(node.branch[1].value.substr(1)),
+					std::stoi(node.branch[0].value),
+					node.branch[1].value.front() == 'u'
+				)
+			);
 			break;
 		case NODE::ADD:
 			return builder.CreateFAdd(codegen(node.branch[0]), codegen(node.branch[1]), "addtmp");
@@ -259,19 +283,20 @@ public:
 			return builder.CreateFSub(codegen(node.branch[0]), codegen(node.branch[1]), "subtmp");
 			break;
 		case NODE::VARIABLE:
-			return builder.CreateLoad(variables[node.value].second, variables[node.value].first);
+			//return builder.CreateLoad(((llvm::AllocaInst*)(variables[node.value]))->getAllocatedType(), variables[node.value]);//variables.secondType=Value*
+			return builder.CreateLoad(variables[node.value]->getAllocatedType(), variables[node.value]);//variables.secondType=Value*
 			break;
 		case NODE::ASSIGN:
-			return builder.CreateStore(codegen(node.branch[1]),variables[node.branch[0].value].first);
+			return builder.CreateStore(codegen(node.branch[1]),variables[node.branch[0].value]);
 			break;
 		case NODE::DECLARE_AUTO:
 		{
 			auto *value=codegen(node.branch[1]);
 			variables.emplace(
 				node.branch[0].value,
-				std::pair(builder.CreateAlloca(value->getType(), nullptr, node.branch[0].value),value->getType())
+				builder.CreateAlloca(value->getType(), nullptr, node.branch[0].value)
 			);
-			return builder.CreateStore(value, variables[node.branch[0].value].first);
+			return builder.CreateStore(value, variables[node.branch[0].value]);
 		}
 			break;
 		case NODE::LESS:
@@ -301,7 +326,6 @@ public:
 			codegen(node.branch[1]);
 			builder.CreateBr(merge);
 			elseB = builder.GetInsertBlock();
-			
 			function->getBasicBlockList().push_back(merge);
 			builder.SetInsertPoint(merge);
 		}
@@ -315,7 +339,6 @@ public:
 			auto* loop = llvm::BasicBlock::Create(context, "loop", function);
 			auto* then = llvm::BasicBlock::Create(context, "then", function);
 			auto* after = llvm::BasicBlock::Create(context,"afterLoop",function);
-			//function->getBasicBlockList().push_back(after);
 			builder.CreateBr(loop);
 			builder.SetInsertPoint(loop);
 			builder.CreateCondBr(
@@ -363,9 +386,11 @@ public:
 	}
 };
 int main() {
-	auto tokens = Lexer().tokenize("fn test(double x){x=x+1;return x;}fn main(){return test(1);}");
+	auto tokens = Lexer().tokenize("fn main(){let x=0.1;return 10i32;}");
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
+	auto floatNum = (number.push() + BNF(".") + number.push()).regist(NODE::FLOATING_POINT);//.number|f
+	auto intNum = (number.push()+BNF(TOKEN::IDENT).push()).regist(NODE::INT);
 	BNF expr;
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
 	BNF mul, add;
@@ -373,7 +398,7 @@ int main() {
 	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + compare.push()).regist(NODE::DECLARE_AUTO);
 	auto assign = ((*add).push() + BNF("=") + (*add).push()).regist(NODE::ASSIGN);
 	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
-	auto primary = BNF("(")+(*compare).expect(BNF(")")) | number|call|variable;
+	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum|call|variable;
 	mul = (primary.push()+(BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
 	add =( mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
 	BNF ret, ifExpr, forExpr, whileExpr, block;
@@ -389,7 +414,49 @@ int main() {
 	generator.codegen(program(iter));
 	generator.getModule()->print(llvm::outs(),nullptr);
 	JIT engine(generator.getModule());
-	llvm::outs()<<(int)engine.run().DoubleVal;
+	llvm::outs()<<engine.run().IntVal;
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
+//
+//		{
+//			variables.clear();
+//			builder.SetInsertPoint(
+//				llvm::BasicBlock::Create(context, "entry",
+//					llvm::Function::Create(
+//						llvm::FunctionType::get(retType = builder.getVoidTy(),
+//							llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy())), false),
+//							llvm::Function::ExternalLinkage, "work", * mainModule)
+//							)
+//							);
+//							for (auto i = 0; auto & arg : mainModule->getFunction("work")->args()) {
+//								variables.emplace(
+//									node.branch[1].branch[i].branch[1].value,
+//									builder.CreateAlloca(arg.getType(), nullptr, node.branch[1].branch[i].branch[1].value)
+//								);
+//								builder.CreateStore(&arg, variables[node.branch[1].branch[i].branch[1].value]);
+//							}
+//							codegen(node.branch[2/*block*/]);
+//							variables.clear();
+//							auto* func = llvm::Function::Create(
+//								llvm::FunctionType::get(
+//									retType,
+//									llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy()))
+//									, false
+//								),
+//								llvm::Function::ExternalLinkage,
+//								node.branch[0/*function name*/].value,
+//								*mainModule
+//							);
+//							for (auto i = 0; auto & arg :func->args()) {
+//								variables.emplace(
+//									node.branch[1].branch[i].branch[1].value,
+//									builder.CreateAlloca(arg.getType(), nullptr, node.branch[1].branch[i].branch[1].value)
+//								);
+//								builder.CreateStore(&arg, variables[node.branch[1].branch[i].branch[1].value]);
+//							}
+//							mainModule->getFunction("work")->eraseFromParent();
+//							codegen(node.branch[2/*block*/]);
+//							//std::swap(func->getBasicBlockList(), mainModule->getFunction("work")->getBasicBlockList());
+//							//mainModule->getFunction("work")->eraseFromParent();
+//			}
