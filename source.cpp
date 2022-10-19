@@ -304,37 +304,39 @@ public:
 			break;
 		case NODE::IF:
 		{
-			Node zero;
-			zero.value = "0";
-			zero.node = NODE::NUMBER;
-			auto* function = builder.GetInsertBlock()->getParent();
-			auto *then = llvm::BasicBlock::Create(context, "then", function);
-			auto* elseB = llvm::BasicBlock::Create(context, "else");
-			auto* merge = llvm::BasicBlock::Create(context, "ifcont");
-			builder.CreateCondBr(
-				builder.CreateFCmpONE(codegen(node.branch[0].branch[0]), codegen(zero), "ifcond"),
-				then,
-				elseB
-			);
-			builder.SetInsertPoint(then);
-			codegen(node.branch[0].branch[1]);
-			builder.CreateBr(merge);
-			then = builder.GetInsertBlock();
+			std::vector<llvm::BasicBlock*> blocks;
+			for (auto i = 0; i <= node.branch.size(); ++i) {
+				blocks.push_back(llvm::BasicBlock::Create(context, "ifBlock", builder.GetInsertBlock()->getParent()));
+			}
+			llvm::BasicBlock* before;
+			for (auto i = 0; i < blocks.size() -1 - (node.branch[node.branch.size() - 1].branch.size() == 1); ++i) {
+				before = node.branch.size()==1?blocks.back() : llvm::BasicBlock::Create(context, "branch", builder.GetInsertBlock()->getParent());
+				builder.CreateCondBr(
+					builder.CreateFCmpONE(codegen(node.branch[i].branch[0]), llvm::ConstantFP::get(context, llvm::APFloat(0.0)), "ifcond"),
+					blocks[i],
+					before
+				);
+				builder.SetInsertPoint(before);
+			}
+			if (node.branch[node.branch.size() - 1].branch.size() == 1) {
+				builder.CreateBr(blocks[blocks.size()-2]);
+			}
+			for (auto i = 0; i < blocks.size()-1-(node.branch[node.branch.size()-1].branch.size()==1); ++i) {
+				builder.SetInsertPoint(blocks[i]);
+				codegen(node.branch[i].branch[1]);
+				builder.CreateBr(blocks.back());
+			}
+			if (node.branch[node.branch.size() - 1].branch.size() == 1) {
+				builder.SetInsertPoint(blocks[blocks.size() - 2]);
+				codegen(node.branch[node.branch.size() - 1]);
+				builder.CreateBr(blocks.back());
+			}
 
-			function->getBasicBlockList().push_back(elseB);
-			builder.SetInsertPoint(elseB);
-			codegen(node.branch[1]);
-			builder.CreateBr(merge);
-			elseB = builder.GetInsertBlock();
-			function->getBasicBlockList().push_back(merge);
-			builder.SetInsertPoint(merge);
+			builder.SetInsertPoint(blocks.back());
 		}
 			break;
 		case NODE::WHILE:
 		{
-			Node zero;
-			zero.value = "0";
-			zero.node = NODE::NUMBER;
 			auto* function = builder.GetInsertBlock()->getParent();
 			auto* loop = llvm::BasicBlock::Create(context, "loop", function);
 			auto* then = llvm::BasicBlock::Create(context, "then", function);
@@ -342,7 +344,7 @@ public:
 			builder.CreateBr(loop);
 			builder.SetInsertPoint(loop);
 			builder.CreateCondBr(
-				builder.CreateFCmpONE(codegen(node.branch[0]), codegen(zero), "loopCond"),
+				builder.CreateFCmpONE(codegen(node.branch[0]), llvm::ConstantFP::get(context, llvm::APFloat(0.0)), "loopCond"),
 				then,
 				after
 			);
@@ -386,7 +388,7 @@ public:
 	}
 };
 int main() {
-	auto tokens = Lexer().tokenize("fn main(){let x=0.1;return 10i32;}");
+	auto tokens = Lexer().tokenize("fn main(){if 0.0{return 89.0;};return 0.0;}");
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto floatNum = (number.push() + BNF(".") + number.push()).regist(NODE::FLOATING_POINT);//.number|f
@@ -401,11 +403,11 @@ int main() {
 	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum|call|variable;
 	mul = (primary.push()+(BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
 	add =( mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
-	BNF ret, ifExpr, forExpr, whileExpr, block;
-	expr =(*ret) |let|*whileExpr|assign|compare;
+	BNF ret, ifExpr, whileExpr, block;
+	expr =(*ret) |let|*whileExpr|*ifExpr|assign|compare;
 	ret = (BNF("return") + expr.push()).regist(NODE::RETURN);
 	block = (BNF("{") + expr.expect(BNF(";")).push().loop() + BNF("}")).regist(NODE::BLOCK);
-	ifExpr = ((BNF("if")+expr.push() + block.push()).push()[(BNF("else") + BNF("if") + expr.push() + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
+	ifExpr = ((BNF("if")+expr.push() + block.push()).push()[(BNF("elif") + expr.push() + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
 	whileExpr = (BNF("while") + expr.push() + block.push()).regist(NODE::WHILE);
 	auto externFunc = (BNF("extern") + BNF(TOKEN::IDENT).push() + BNF("(")[BNF(TOKEN::IDENT).push()[BNF(",")].loop()].push() + BNF(")") + BNF(";")).regist(NODE::EXTERN);
 	auto func = (BNF("fn") + BNF(TOKEN::IDENT).push() + BNF("(")[(BNF(TOKEN::IDENT).push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")") + block.push()).regist(NODE::FUNCTION);
@@ -414,49 +416,7 @@ int main() {
 	generator.codegen(program(iter));
 	generator.getModule()->print(llvm::outs(),nullptr);
 	JIT engine(generator.getModule());
-	llvm::outs()<<engine.run().IntVal;
+	llvm::outs()<<(int)engine.run().DoubleVal;
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
-//
-//		{
-//			variables.clear();
-//			builder.SetInsertPoint(
-//				llvm::BasicBlock::Create(context, "entry",
-//					llvm::Function::Create(
-//						llvm::FunctionType::get(retType = builder.getVoidTy(),
-//							llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy())), false),
-//							llvm::Function::ExternalLinkage, "work", * mainModule)
-//							)
-//							);
-//							for (auto i = 0; auto & arg : mainModule->getFunction("work")->args()) {
-//								variables.emplace(
-//									node.branch[1].branch[i].branch[1].value,
-//									builder.CreateAlloca(arg.getType(), nullptr, node.branch[1].branch[i].branch[1].value)
-//								);
-//								builder.CreateStore(&arg, variables[node.branch[1].branch[i].branch[1].value]);
-//							}
-//							codegen(node.branch[2/*block*/]);
-//							variables.clear();
-//							auto* func = llvm::Function::Create(
-//								llvm::FunctionType::get(
-//									retType,
-//									llvm::ArrayRef(std::vector<llvm::Type*>(node.branch[1/*arguments type*/].branch.size(), builder.getDoubleTy()))
-//									, false
-//								),
-//								llvm::Function::ExternalLinkage,
-//								node.branch[0/*function name*/].value,
-//								*mainModule
-//							);
-//							for (auto i = 0; auto & arg :func->args()) {
-//								variables.emplace(
-//									node.branch[1].branch[i].branch[1].value,
-//									builder.CreateAlloca(arg.getType(), nullptr, node.branch[1].branch[i].branch[1].value)
-//								);
-//								builder.CreateStore(&arg, variables[node.branch[1].branch[i].branch[1].value]);
-//							}
-//							mainModule->getFunction("work")->eraseFromParent();
-//							codegen(node.branch[2/*block*/]);
-//							//std::swap(func->getBasicBlockList(), mainModule->getFunction("work")->getBasicBlockList());
-//							//mainModule->getFunction("work")->eraseFromParent();
-//			}
