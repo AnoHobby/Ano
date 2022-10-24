@@ -74,6 +74,7 @@ enum class NODE {
 	FLOATING_POINT,
 	ARRAY,
 	ARRAY_ACCESS,
+	SCALAR,
 	REFERENCE,
 	STRUCT,
 	STRUCT_INIT,
@@ -378,30 +379,54 @@ class MemberNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateLoad(
-			cg.getVariables()[node.branch[0].value]->getAllocatedType()->getStructElementType(cg.getStructMember()[node.branch[0].value][node.branch[1].value]),
-			cg.getBuilder().CreateStructGEP(
-				cg.getVariables()[node.branch[0].value]->getAllocatedType(),
-				cg.getVariables()[node.branch[0].value],
-				cg.getStructMember()[node.branch[0].value][node.branch[1].value]
-			)
-		);
+		llvm::Value* value = cg.getVariables()[node.branch[0].value];
+		for (auto *structType = cg.getVariables()[node.branch[0].value]->getAllocatedType(); auto &member:node.branch[1].branch) {
+			value=cg.getBuilder().CreateStructGEP(
+				structType,
+				value,
+				cg.getStructMember()[structType->getStructName().str()][member.value]
+			);
+				structType = structType->getStructElementType(cg.getStructMember()[structType->getStructName().str()][member.value]);
+
+		}
+		return value;
 	}
+};
+class LoadNode :public Codegen{
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		switch (node.branch[0].node) {
+		case NODE::ARRAY_ACCESS:
+			return cg.getBuilder().CreateLoad(
+				cg.getVariables()[node.branch[0].branch[0].value]->getAllocatedType()->getArrayElementType(),
+				cg.codegen(node.branch[0])
+			);
+			break;
+		case NODE::MEMBER:
+		{
+			auto* value = static_cast<llvm::AllocaInst*>(cg.codegen(node.branch[0]));
+			return cg.getBuilder().CreateLoad(value->getAllocatedType()->getStructElementType(cg.getStructMember()[value->getAllocatedType()->getStructName().str()][node.branch[0].branch[1].branch.back().value]), value);
+
+		}
+			break;
+
+		}
+	}
+
 };
 class ArrayAccessNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateLoad(
-			cg.getVariables()[node.branch[0].value]->getAllocatedType()->getArrayElementType(),
-			cg.getBuilder().CreateGEP(
+		return cg.getBuilder().CreateGEP(
 				cg.getVariables()[node.branch[0].value]->getAllocatedType(),
 				cg.getVariables()[node.branch[0].value],
 				{
 					llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
 					cg.codegen(node.branch[1]),
 				}
-				)
+
 		);
 	}
 };
@@ -422,73 +447,83 @@ public:
 		return cg.getVariables()[node.value];
 	}
 };
+class StructInitNode :public Codegen{
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {//idea:structName{membername:value,membername2:value2};
+		auto *structValue=cg.getBuilder().CreateAlloca(cg.getType()(node.branch[0].value));
+		for (auto i = 0; auto & value:node.branch[1].branch) {
+			cg.getBuilder().CreateStore(
+				cg.codegen(value),
+				cg.getBuilder().CreateStructGEP(structValue->getAllocatedType(), structValue, i)
+			);
+			++i;
+		}
+		return structValue;
+	}
+};
+class ArrayNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		auto* arrayValue = cg.getBuilder().CreateAlloca(llvm::ArrayType::get(cg.codegen(node.branch[0])->getType(), node.branch.size()));
+		for (auto i = 0; i < node.branch.size(); ++i) {
+			cg.getBuilder().CreateStore(
+				cg.codegen(node.branch[i]),
+				cg.getBuilder().CreateGEP(
+					arrayValue->getAllocatedType(),
+					arrayValue,
+					{
+						llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
+						llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),i),
+					}
+					)
+			);
+		}
+		return arrayValue;
+	}
+};
+class ScalarNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		auto* value = cg.codegen(node.branch[0]);
+		auto*variable=cg.getBuilder().CreateAlloca(value->getType());
+		cg.getBuilder().CreateStore(value, variable);
+		return variable;
+	}
+};
 class LetNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		if (node.branch[1].node == NODE::ARRAY) {
-			auto* value = cg.codegen(node.branch[1].branch[0]);
-			auto* arrayValue = cg.getBuilder().CreateAlloca(llvm::ArrayType::get(value->getType(), node.branch[1].branch.size()));
-			for (auto i = 0; i < node.branch[1].branch.size(); ++i) {
-				cg.getBuilder().CreateStore(
-					cg.codegen(node.branch[1].branch[i]),
-					cg.getBuilder().CreateGEP(
-						arrayValue->getAllocatedType(),
-						arrayValue,
-						{
-							llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
-							llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),i),
-						}
-						)
-				);
-			}
-			cg.getVariables().emplace(node.branch[0].value, arrayValue);
-			return cg.getVariables()[node.branch[0].value];
-		}
-		else if (node.branch[1].node == NODE::STRUCT_INIT) {
-			cg.getVariables().emplace(node.branch[0].value, cg.getBuilder().CreateAlloca(cg.getType()(node.branch[1].branch[0].value)));
-			for (auto i = 0; auto & value:node.branch[1].branch[1].branch) {
-				cg.getBuilder().CreateStore(
-					cg.codegen(value),
-					cg.getBuilder().CreateStructGEP(cg.getVariables()[node.branch[0].value]->getAllocatedType(), cg.getVariables()[node.branch[0].value], i)
-				);
-				++i;
-			}
-			return cg.getVariables()[node.branch[0].value];
-		}
-		auto* value = cg.codegen(node.branch[1]);
-		cg.getVariables().emplace(
-			node.branch[0].value,
-			cg.getBuilder().CreateAlloca(value->getType(), nullptr, node.branch[0].value)
-		);
-		return cg.getBuilder().CreateStore(value, cg.getVariables()[node.branch[0].value]);
+		cg.getVariables().emplace(node.branch[0].value,static_cast<llvm::AllocaInst*>(cg.codegen(
+			[&] {
+				switch (node.branch[1].node) {
+				case NODE::ARRAY:
+				case NODE::STRUCT_INIT:
+					return node.branch[1];
+				}
+				Node scalar;
+				scalar.node = NODE::SCALAR;
+				scalar.branch.push_back(node.branch[1]);
+				return scalar;
+			}()
+			
+		)));
+		cg.getVariables()[node.branch[0].value]->setName(node.branch[0].value);
+		return cg.getVariables()[node.branch[0].value];
 	}
 };
+
 class AssignNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		return cg.getBuilder().CreateStore(
 			cg.codegen(node.branch[1]),
-			[&]()->llvm::Value* {
-				if (node.branch[0].node == NODE::VARIABLE)return cg.getVariables()[node.branch[0].value];
-				else if (node.branch[0].node == NODE::MEMBER) {
-					return 	cg.getBuilder().CreateStructGEP(
-						cg.getVariables()[node.branch[0].branch[0].value]->getAllocatedType(),
-						cg.getVariables()[node.branch[0].branch[0].value],
-						cg.getStructMember()[node.branch[0].branch[0].value][node.branch[0].branch[1].value]
-					);
-				}
-				return cg.getBuilder().CreateGEP(
-					cg.getVariables()[node.branch[0].branch[0].value]->getAllocatedType(),
-					cg.getVariables()[node.branch[0].branch[0].value],
-					{
-						llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
-						cg.codegen(node.branch[0].branch[1]),
-					}
-				);
-			}()
-				);
+			cg.codegen(node.branch[0])
+		);
 	}
 };
 class BlockNode :public Codegen {
@@ -624,6 +659,7 @@ public:
 		std::vector<llvm::Value*> args(node.branch[1].branch.size());
 		for (auto i = 0; auto & arg:args) {
 			arg = cg.codegen(node.branch[1].branch[i]);
+			++i;
 		}
 		return cg.getBuilder().CreateCall(cg.getModule()->getFunction(node.branch[0].value), args);
 	}
@@ -647,7 +683,7 @@ public:
 	}
 };
 int main() {
-	auto tokens = Lexer().tokenize("fn main(){return 10.0;}");
+	auto tokens = Lexer().tokenize("struct B{double value;} struct A{double n;B obj;}fn main(){let x=A{0.0};x.obj.value=4649.0;return x.obj.value;}");
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto type = BNF(TOKEN::IDENT).push()[BNF("*").push().loop()];
@@ -656,22 +692,22 @@ int main() {
 	auto intNum = (number.push()+BNF(TOKEN::IDENT).push()).regist(NODE::INT);
 	BNF expr;
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
-	auto member = ((variable|call).push() + (BNF(".") + (variable | call).push().loop())).regist(NODE::MEMBER);
+	auto member = ((variable|call).push() + ((BNF(".") + (variable | call)).push().loop().push())).regist(NODE::MEMBER);
 	BNF mul, add;
 	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);
 	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + compare.push()).regist(NODE::LET);
 	auto reference = (BNF("&") + variable).regist(NODE::REFERENCE);
 	auto arrayAccess = (variable.push() + BNF("[") + (*expr).push() + BNF("]")).regist(NODE::ARRAY_ACCESS);
-	auto assign = ((arrayAccess|member|variable).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
+	auto assign = ((arrayAccess|member|variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
-	auto structInit = (BNF(TOKEN::IDENT).push()+BNF("{")+((*expr)[BNF(",")]).push().loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);//ident(member)+expr
-	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum| structInit|arrayExpr|arrayAccess|member|call|reference|variable;
+	auto structInit = (BNF(TOKEN::IDENT).push()+BNF("{")+((*expr).push()[BNF(",")]).loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);//ident(member)+expr
+	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum| structInit|arrayExpr|arrayAccess.push().regist(NODE::LOAD) | member.push().regist(NODE::LOAD) | call | reference | variable;
 	mul = (primary.push()+(BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
 	add =( mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
 	auto ret = (BNF("return") + (*expr).push()).regist(NODE::RETURN);
 	auto block = (BNF("{") + (*expr).expect(BNF(";")).push().loop() + BNF("}")).regist(NODE::BLOCK);
-	auto ifExpr = ((BNF("if") + (*expr).push() + block.push()).push()[(BNF("elif") + (*expr).push() + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
-	auto whileExpr = (BNF("while") + (*expr.push()) + block.push()).regist(NODE::WHILE);
+	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push()[((BNF("elif") | BNF("else") + BNF("if"))[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
+	auto whileExpr = (BNF("while")[BNF("(")] + (*expr.push())[BNF(")")] + block.push()).regist(NODE::WHILE);
 	auto structExpr = (BNF("struct")+BNF(TOKEN::IDENT).push() + BNF("{") + (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).push().loop().push() + BNF("}")).regist(NODE::STRUCT);
 	expr =ret|let|whileExpr|ifExpr|assign|compare ;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[type.push()[BNF(",")].loop()].push() + BNF(")") + BNF(";")).regist(NODE::EXTERN);
@@ -686,8 +722,11 @@ int main() {
 	codegen.emplace<DoubleNode>(NODE::FLOATING_POINT);
 	codegen.emplace<IntNode>(NODE::INT);
 	codegen.emplace<StructNode>(NODE::STRUCT);
+	codegen.emplace<StructInitNode>(NODE::STRUCT_INIT);
 	codegen.emplace<MemberNode>(NODE::MEMBER);
+	codegen.emplace<ArrayNode>(NODE::ARRAY);
 	codegen.emplace<ArrayAccessNode>(NODE::ARRAY_ACCESS);
+	codegen.emplace<ScalarNode>(NODE::SCALAR);
 	codegen.emplace<VariableNode>(NODE::VARIABLE);
 	codegen.emplace<ReferenceNode>(NODE::REFERENCE);
 	codegen.emplace<LetNode>(NODE::LET);
@@ -699,304 +738,11 @@ int main() {
 	codegen.emplace<DivNode>(NODE::DIV);
 	codegen.emplace<IfNode>(NODE::IF);
 	codegen.emplace<WhileNode>(NODE::WHILE);
+	codegen.emplace<LoadNode>(NODE::LOAD);
 	codegen.codegen(program(iter));
-	//Generator generator;
-	//generator.codegen(program(iter));
-	//generator.getModule()->print(llvm::outs(),nullptr);
 	codegen.getModule()->print(llvm::outs(), nullptr);
 	JIT engine(codegen.getModule());
 	llvm::outs()<<(int)engine.run().DoubleVal;
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
-//memberノードはgepを処理してloadで読み込む。パースのときにload命令をregistする
-//baseCode(CodeGenerator class)
-//class Generator {
-//protected:
-//	llvm::LLVMContext context;
-//	std::unique_ptr<llvm::Module> mainModule;
-//	llvm::IRBuilder<> builder;
-//	std::unordered_map<std::string, llvm::AllocaInst*> variables;//variable name->{variable,valueType}
-//	std::unordered_map<std::string, std::unordered_map<std::string, unsigned> > structMember;//structName->structMember->id
-//	llvm::Type* retType;
-//	Type typeAnalyzer;
-//public:
-//	Generator() :
-//		mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
-//		builder(context),
-//		typeAnalyzer(builder)
-//	{
-//
-//	}
-//	llvm::Value* codegen(Node node) {
-//		switch (node.node) {
-//		case NODE::BLOCK:
-//		{
-//			llvm::Value* result;
-//			for (const auto& child : node.branch) {
-//				result = codegen(child);
-//			}
-//			return result;
-//		}
-//		break;
-//		case NODE::EXTERN:
-//		{
-//			std::vector<llvm::Type*> args(node.branch[2].branch.size());
-//			for (auto i = 0; auto & arg : args) {
-//				arg = typeAnalyzer(node.branch[2].branch[i].linkBranchStr());
-//				++i;
-//			}
-//			mainModule->getOrInsertFunction(
-//				node.branch[1/*function name*/].value,//function name
-//				llvm::FunctionType::get(
-//					typeAnalyzer(node.branch[0].value),//return type
-//					llvm::ArrayRef(args)
-//					, false
-//				)
-//			);
-//
-//		}
-//		break;
-//		case NODE::FUNCTION:
-//		{
-//			std::vector<llvm::Type*> args(node.branch[1].branch.size());
-//			for (auto i = 0; auto & arg : args) {
-//				arg = typeAnalyzer(node.branch[1].branch[i].branch[0].linkBranchStr());
-//				++i;
-//			}
-//			auto createFunction = [&]() {
-//				variables.clear();
-//				builder.SetInsertPoint(llvm::BasicBlock::Create(context, "entry",
-//					llvm::Function::Create(
-//						llvm::FunctionType::get(retType,//retType=builder.getVoidTy(),
-//							llvm::ArrayRef(args), false),
-//						llvm::Function::ExternalLinkage, node.branch[0/*function name*/].value, *mainModule)
-//				));
-//				for (auto i = 0; auto & arg : mainModule->getFunction(node.branch[0/*function name*/].value)->args()) {
-//					variables.emplace(
-//						node.branch[1].branch[i].branch[1].value,
-//						builder.CreateAlloca(arg.getType(), nullptr, node.branch[1].branch[i].branch[1].value)
-//					);
-//					builder.CreateStore(&arg, variables[node.branch[1].branch[i].branch[1].value]);
-//					++i;
-//				}
-//				codegen(node.branch[2/*block*/]);
-//			};
-//			retType = builder.getVoidTy();
-//			createFunction();
-//			mainModule->getFunction(node.branch[0].value)->eraseFromParent();
-//			createFunction();
-//		}
-//		break;
-//		case NODE::RETURN:
-//		{
-//			auto* value = codegen(node.branch[0/*expression*/]);
-//			retType = value->getType();//todo:継承の度合いが一番高いのを返り値にする
-//			builder.CreateRet(value);
-//		}
-//		break;
-//		case NODE::FLOATING_POINT:
-//			return llvm::ConstantFP::get(context, llvm::APFloat(std::stod(node.linkBranchStr())));
-//			break;
-//		case NODE::INT:
-//			return llvm::ConstantInt::get(
-//				context,
-//				llvm::APInt(
-//					std::stoi(node.branch[1].value.substr(1)),
-//					std::stoi(node.branch[0].value),
-//					node.branch[1].value.front() == 'u'
-//				)
-//			);
-//			break;
-//		case NODE::ADD:
-//			return builder.CreateFAdd(codegen(node.branch[0]), codegen(node.branch[1]), "addtmp");
-//			break;
-//		case NODE::MUL:
-//			return builder.CreateFMul(codegen(node.branch[0]), codegen(node.branch[1]), "multmp");
-//			break;
-//		case NODE::DIV:
-//			return builder.CreateFDiv(codegen(node.branch[0]), codegen(node.branch[1]), "divtmp");
-//			break;
-//		case NODE::SUB:
-//			return builder.CreateFSub(codegen(node.branch[0]), codegen(node.branch[1]), "subtmp");
-//			break;
-//		case NODE::ARRAY_ACCESS:
-//		{
-//
-//			return builder.CreateLoad(
-//				variables[node.branch[0].value]->getAllocatedType()->getArrayElementType(),
-//				builder.CreateGEP(
-//					variables[node.branch[0].value]->getAllocatedType(),
-//					variables[node.branch[0].value],
-//					{
-//						llvm::ConstantInt::get(builder.getInt32Ty(),0),
-//						codegen(node.branch[1]),
-//					}
-//					)
-//			);
-//		}
-//		break;
-//		case NODE::REFERENCE:
-//			return variables[node.value];
-//			break;
-//		case NODE::VARIABLE:
-//			return builder.CreateLoad(variables[node.value]->getAllocatedType(), variables[node.value]);//variables.secondType=Value*
-//			break;
-//		case NODE::STRUCT:
-//		{
-//			auto* structType = llvm::StructType::create(context, node.branch[0].value);
-//			typeAnalyzer.emplace(structType->getName().str(), structType);
-//			std::vector <llvm::Type* > types(node.branch[1].branch.size());
-//			structMember.emplace(structType->getName().str(), decltype(structMember)::mapped_type());
-//			for (unsigned i = 0; auto & type : types) {
-//				type = typeAnalyzer(node.branch[1].branch[i].branch[0].linkBranchStr());
-//				structMember[structType->getName().str()].emplace(node.branch[1].branch[i].branch[1].value, i);
-//				++i;
-//			}
-//			structType->setBody(types, false);
-//
-//		}
-//		break;
-//		case NODE::MEMBER:
-//			return builder.CreateLoad(
-//				variables[node.branch[0].value]->getAllocatedType()->getStructElementType(structMember[node.branch[0].value][node.branch[1].value]),
-//				builder.CreateStructGEP(
-//					variables[node.branch[0].value]->getAllocatedType(),
-//					variables[node.branch[0].value],
-//					structMember[node.branch[0].value][node.branch[1].value]
-//				)
-//			);
-//			break;
-//		case NODE::ASSIGN:
-//			return builder.CreateStore(
-//				codegen(node.branch[1]),
-//				[&]()->llvm::Value* {
-//					if (node.branch[0].node == NODE::VARIABLE)return variables[node.branch[0].value];
-//					else if (node.branch[0].node == NODE::MEMBER) {
-//						return 	builder.CreateStructGEP(
-//							variables[node.branch[0].branch[0].value]->getAllocatedType(),
-//							variables[node.branch[0].branch[0].value],
-//							structMember[node.branch[0].branch[0].value][node.branch[0].branch[1].value]
-//						);
-//					}
-//					return builder.CreateGEP(
-//						variables[node.branch[0].branch[0].value]->getAllocatedType(),
-//						variables[node.branch[0].branch[0].value],
-//						{
-//							llvm::ConstantInt::get(builder.getInt32Ty(),0),
-//							codegen(node.branch[0].branch[1]),
-//						}
-//					);
-//				}()
-//					);
-//			break;
-//		case NODE::LET:
-//		{
-//			if (node.branch[1].node == NODE::ARRAY) {
-//				auto* value = codegen(node.branch[1].branch[0]);
-//				auto* arrayValue = builder.CreateAlloca(llvm::ArrayType::get(value->getType(), node.branch[1].branch.size()));
-//				for (auto i = 0; i < node.branch[1].branch.size(); ++i) {
-//					builder.CreateStore(
-//						codegen(node.branch[1].branch[i]),
-//						builder.CreateGEP(
-//							arrayValue->getAllocatedType(),
-//							arrayValue,
-//							{
-//								llvm::ConstantInt::get(builder.getInt32Ty(),0),
-//								llvm::ConstantInt::get(builder.getInt32Ty(),i),
-//							}
-//							)
-//					);
-//				}
-//				variables.emplace(node.branch[0].value, arrayValue);
-//				return variables[node.branch[0].value];
-//			}
-//			else if (node.branch[1].node == NODE::STRUCT_INIT) {
-//				variables.emplace(node.branch[0].value, builder.CreateAlloca(typeAnalyzer(node.branch[1].branch[0].value)));
-//				for (auto i = 0; auto & value:node.branch[1].branch[1].branch) {
-//					builder.CreateStore(
-//						codegen(value),
-//						builder.CreateStructGEP(variables[node.branch[0].value]->getAllocatedType(), variables[node.branch[0].value], i)
-//					);
-//					++i;
-//				}
-//				return variables[node.branch[0].value];
-//			}
-//			auto* value = codegen(node.branch[1]);
-//			variables.emplace(
-//				node.branch[0].value,
-//				builder.CreateAlloca(value->getType(), nullptr, node.branch[0].value)
-//			);
-//			return builder.CreateStore(value, variables[node.branch[0].value]);
-//		}
-//		break;
-//		case NODE::LESS:
-//			return builder.CreateUIToFP(builder.CreateFCmpULT(codegen(node.branch[0]), codegen(node.branch[1]), "compareTemp"), builder.getDoubleTy(), "boolTemp");
-//			break;
-//		case NODE::IF:
-//		{
-//			std::vector<llvm::BasicBlock*> blocks;
-//			for (auto i = 0; i <= node.branch.size(); ++i) {
-//				blocks.push_back(llvm::BasicBlock::Create(context, "ifBlock", builder.GetInsertBlock()->getParent()));
-//			}
-//			llvm::BasicBlock* before;
-//			for (auto i = 0; i < blocks.size() - 1 - (node.branch[node.branch.size() - 1].branch.size() == 1); ++i) {
-//				before = node.branch.size() == 1 ? blocks.back() : llvm::BasicBlock::Create(context, "branch", builder.GetInsertBlock()->getParent());
-//				builder.CreateCondBr(
-//					builder.CreateFCmpONE(codegen(node.branch[i].branch[0]), llvm::ConstantFP::get(context, llvm::APFloat(0.0)), "ifcond"),
-//					blocks[i],
-//					before
-//				);
-//				builder.SetInsertPoint(before);
-//			}
-//			if (node.branch[node.branch.size() - 1].branch.size() == 1) {
-//				builder.CreateBr(blocks[blocks.size() - 2]);
-//			}
-//			for (auto i = 0; i < blocks.size() - 1 - (node.branch[node.branch.size() - 1].branch.size() == 1); ++i) {
-//				builder.SetInsertPoint(blocks[i]);
-//				codegen(node.branch[i].branch[1]);
-//				builder.CreateBr(blocks.back());
-//			}
-//			if (node.branch[node.branch.size() - 1].branch.size() == 1) {
-//				builder.SetInsertPoint(blocks[blocks.size() - 2]);
-//				codegen(node.branch[node.branch.size() - 1]);
-//				builder.CreateBr(blocks.back());
-//			}
-//
-//			builder.SetInsertPoint(blocks.back());
-//		}
-//		break;
-//		case NODE::WHILE:
-//		{
-//			auto* function = builder.GetInsertBlock()->getParent();
-//			auto* loop = llvm::BasicBlock::Create(context, "loop", function);
-//			auto* then = llvm::BasicBlock::Create(context, "then", function);
-//			auto* after = llvm::BasicBlock::Create(context, "afterLoop", function);
-//			builder.CreateBr(loop);
-//			builder.SetInsertPoint(loop);
-//			builder.CreateCondBr(
-//				builder.CreateFCmpONE(codegen(node.branch[0]), llvm::ConstantFP::get(context, llvm::APFloat(0.0)), "loopCond"),
-//				then,
-//				after
-//			);
-//			builder.SetInsertPoint(then);
-//			codegen(node.branch[1]);
-//			builder.CreateBr(loop);
-//			builder.SetInsertPoint(after);
-//		}
-//		break;
-//		case NODE::CALL:
-//		{
-//			std::vector<llvm::Value*> args(node.branch[1].branch.size());
-//			for (auto i = 0; auto & arg:args) {
-//				arg = codegen(node.branch[1].branch[i]);
-//			}
-//			return builder.CreateCall(mainModule->getFunction(node.branch[0].value), args);
-//		}
-//		break;
-//		}
-//	}
-//	auto& getModule() {
-//		return mainModule;
-//	}
-//};
