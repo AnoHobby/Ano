@@ -74,12 +74,13 @@ enum class NODE {
 	FLOATING_POINT,
 	ARRAY,
 	ARRAY_ACCESS,
+	ARRAY_ACCESS_LOAD,
 	SCALAR,
 	REFERENCE,
 	STRUCT,
 	STRUCT_INIT,
 	MEMBER,
-	LOAD
+	MEMBER_LOAD,
 };
 class Node {
 private:
@@ -392,29 +393,25 @@ public:
 		return value;
 	}
 };
-class LoadNode :public Codegen{
+class ArrayAccessLoadNode :public Codegen{
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		switch (node.branch[0].node) {
-		case NODE::ARRAY_ACCESS:
-			return cg.getBuilder().CreateLoad(
-				cg.getVariables()[node.branch[0].branch[0].value]->getAllocatedType()->getArrayElementType(),
-				cg.codegen(node.branch[0])
-			);
-			break;
-		case NODE::MEMBER:
-		{
-			auto* value = static_cast<llvm::AllocaInst*>(cg.codegen(node.branch[0]));
-			return cg.getBuilder().CreateLoad(value->getAllocatedType()->getStructElementType(cg.getStructMember()[value->getAllocatedType()->getStructName().str()][node.branch[0].branch[1].branch.back().value]), value);
-
-		}
-			break;
-
-		}
+		return cg.getBuilder().CreateLoad(
+			cg.getVariables()[node.branch[0].branch[0].value]->getAllocatedType()->getArrayElementType(),
+			cg.codegen(node)
+		);
 	}
-
 };
+class MemberLoadNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {\
+		auto* value = static_cast<llvm::AllocaInst*>(cg.codegen(node.branch[0]));
+		return cg.getBuilder().CreateLoad(value->getAllocatedType()->getStructElementType(cg.getStructMember()[value->getAllocatedType()->getStructName().str()][node.branch[0].branch[1].branch.back().value]), value);
+	}
+};
+
 class ArrayAccessNode :public Codegen {
 private:
 public:
@@ -497,20 +494,7 @@ class LetNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		cg.getVariables().emplace(node.branch[0].value,static_cast<llvm::AllocaInst*>(cg.codegen(
-			[&] {
-				switch (node.branch[1].node) {
-				case NODE::ARRAY:
-				case NODE::STRUCT_INIT:
-					return node.branch[1];
-				}
-				Node scalar;
-				scalar.node = NODE::SCALAR;
-				scalar.branch.push_back(node.branch[1]);
-				return scalar;
-			}()
-			
-		)));
+		cg.getVariables().emplace(node.branch[0].value,static_cast<llvm::AllocaInst*>(cg.codegen(node.branch[1])));
 		cg.getVariables()[node.branch[0].value]->setName(node.branch[0].value);
 		return cg.getVariables()[node.branch[0].value];
 	}
@@ -683,26 +667,26 @@ public:
 	}
 };
 int main() {
-	auto tokens = Lexer().tokenize("struct B{double value;} struct A{double n;B obj;}fn main(){let x=A{0.0};x.obj.value=4649.0;return x.obj.value;}");
+	auto tokens = Lexer().tokenize("fn main(){let x=4649.0;return x;}");
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto type = BNF(TOKEN::IDENT).push()[BNF("*").push().loop()];
 	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
+	auto reference = (BNF("&") + variable).regist(NODE::REFERENCE);
 	auto floatNum = (number.push() + BNF(".").push() + number.push()).regist(NODE::FLOATING_POINT);//.number|f
 	auto intNum = (number.push()+BNF(TOKEN::IDENT).push()).regist(NODE::INT);
 	BNF expr;
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
-	auto member = ((variable|call).push() + ((BNF(".") + (variable | call)).push().loop().push())).regist(NODE::MEMBER);
-	BNF mul, add;
-	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);
-	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + compare.push()).regist(NODE::LET);
-	auto reference = (BNF("&") + variable).regist(NODE::REFERENCE);
 	auto arrayAccess = (variable.push() + BNF("[") + (*expr).push() + BNF("]")).regist(NODE::ARRAY_ACCESS);
-	auto assign = ((arrayAccess|member|variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
+	auto member = ((variable|call).push() + ((BNF(".") + (variable | call)).push().loop().push())).regist(NODE::MEMBER);
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
-	auto structInit = (BNF(TOKEN::IDENT).push()+BNF("{")+((*expr).push()[BNF(",")]).loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);//ident(member)+expr
-	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum| structInit|arrayExpr|arrayAccess.push().regist(NODE::LOAD) | member.push().regist(NODE::LOAD) | call | reference | variable;
-	mul = (primary.push()+(BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
+	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") + ((*expr).push()[BNF(",")]).loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);//ident(member)+expr
+	BNF  add;
+	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);	
+	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + (arrayExpr|structInit|compare.push().regist(NODE::SCALAR)).push()).regist(NODE::LET);
+	auto assign = ((arrayAccess|member|variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
+	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum| structInit|arrayExpr|arrayAccess.push().regist(NODE::ARRAY_ACCESS_LOAD) | member.push().regist(NODE::MEMBER_LOAD) | call | reference | variable;
+	auto mul = (primary.push()+(BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
 	add =( mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
 	auto ret = (BNF("return") + (*expr).push()).regist(NODE::RETURN);
 	auto block = (BNF("{") + (*expr).expect(BNF(";")).push().loop() + BNF("}")).regist(NODE::BLOCK);
@@ -738,7 +722,8 @@ int main() {
 	codegen.emplace<DivNode>(NODE::DIV);
 	codegen.emplace<IfNode>(NODE::IF);
 	codegen.emplace<WhileNode>(NODE::WHILE);
-	codegen.emplace<LoadNode>(NODE::LOAD);
+	codegen.emplace<ArrayAccessLoadNode>(NODE::ARRAY_ACCESS_LOAD);
+	codegen.emplace<MemberLoadNode>(NODE::MEMBER_LOAD);
 	codegen.codegen(program(iter));
 	codegen.getModule()->print(llvm::outs(), nullptr);
 	JIT engine(codegen.getModule());
