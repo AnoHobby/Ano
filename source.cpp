@@ -20,12 +20,12 @@ class File {
 private:
 	const std::string name;
 public:
-	File(decltype(name) nmae):name(name) {
+	File(decltype(name) name):name(name) {
 	}
 	std::string read() {
 		std::fstream file(name);
-		if (!file)return "";
-		return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+		if (!file) return "";
+		return std::string(std::istreambuf_iterator<decltype(name)::value_type >(file), std::istreambuf_iterator<decltype(name)::value_type>());
 	}
 };
 enum class TOKEN {
@@ -40,6 +40,8 @@ private:
 public:
 	using tokensT = std::vector<std::pair<TOKEN, std::string> >;
 	auto tokenize(std::string str) {
+		str.push_back('\n');
+		str=std::regex_replace(str, std::regex(R"((//.*?[^\n]\n)|[\n])"), "");
 		tokensT data;
 		while (str.size()) {
 			auto check = [&](const auto token, const auto regex) {
@@ -51,7 +53,7 @@ public:
 			};
 			if (
 				check(TOKEN::NUMBER, R"(^\d+)") ||
-				check(TOKEN::RESERVED, R"(^([&\[\];,\.\(\)+*/=\-<>{}]))") ||
+				check(TOKEN::RESERVED, R"(^[&\[\];,\.\(\)+*/=\-<>{}])") ||
 				check(TOKEN::IDENT, R"(^[a-zA-Z_][\w]*)") ||
 				check(TOKEN::STRING, "^\".*?[^\\\\]\"")
 				) {
@@ -785,7 +787,7 @@ public:
 	}
 };
 int main(int args, char* argv[]) {
-	auto tokens = Lexer().tokenize("extern i32 puts(i32*);fn main(){let str=\"string\";puts(str);return {1.0;};}");
+	auto tokens =Lexer().tokenize(File("test.txt").read());
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto string = BNF(TOKEN::STRING).regist(NODE::STRING);
