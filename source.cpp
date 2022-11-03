@@ -14,6 +14,7 @@
 #include <sstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <regex>
 #include <unordered_map>
 class File {
@@ -395,9 +396,10 @@ class ArrayAccessLoadNode :public Codegen{
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		auto arrayValue = cg.codegen(node.branch[0]);
 		return cg.getBuilder().CreateLoad(
-			cg.getVariables()[node.branch[0].branch[0].value]->getType()->getNonOpaquePointerElementType()->getArrayElementType(),
-			cg.codegen(node)
+			arrayValue->getType()->getNonOpaquePointerElementType(),
+			arrayValue
 		);
 	}
 };
@@ -406,9 +408,10 @@ class ArrayAccessNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		auto arrayRef = cg.codegen(node.branch[0]);
 		return cg.getBuilder().CreateGEP(
-				cg.getVariables()[node.branch[0].value]->getType()->getNonOpaquePointerElementType(),
-				cg.getVariables()[node.branch[0].value],
+				arrayRef->getType()->getNonOpaquePointerElementType(),
+			    arrayRef,
 				{
 					llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
 					cg.codegen(node.branch[1]),
@@ -439,12 +442,15 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {//idea:structName{membername:value,membername2:value2};
 		auto* structValue = cg.getBuilder().CreateAlloca(cg.getType()(node.branch[0].value));
-		for (auto i = 0; auto & value:node.branch[1].branch) {
+		for (auto & value:node.branch[1].branch) {
 			cg.getBuilder().CreateStore(
-				cg.codegen(value),
-				cg.getBuilder().CreateStructGEP(structValue->getAllocatedType(), structValue, i)
+				cg.codegen(value.branch[1]),
+				cg.getBuilder().CreateStructGEP(
+					structValue->getAllocatedType(),
+					structValue,
+					cg.getStructMember()[structValue->getAllocatedType()->getStructName().str()][value.branch[0].value]
+					)
 			);
-			++i;
 		}
 		return structValue;
 	}
@@ -798,13 +804,12 @@ int main(int args, char* argv[]) {
 	auto intNum = (number.push() + BNF(TOKEN::IDENT).push()).regist(NODE::INT);
 	BNF expr;
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
-	auto arrayAccess = (variable.push() + BNF("[") + (*expr).push() + BNF("]")).regist(NODE::ARRAY_ACCESS);
+	auto arrayAccess = (variable.regist(NODE::REFERENCE).push() + BNF("[") + (*expr).push() + BNF("]")).regist(NODE::ARRAY_ACCESS);
 	auto member = ((call | variable.regist(NODE::REFERENCE)).push() + ((BNF(".") + (call | variable.regist(NODE::REFERENCE))).push().loop())).regist(NODE::MEMBER);
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
-	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") + ((*expr).push()[BNF(",")]).loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);//ident(member)+expr
+	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") + ((variable.push() + (*expr).push()).push()[BNF(",")]).loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);//ident(member)+expr
 	BNF  add;
 	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);	
-	//auto let=BNF("let")+assign;alloca->assignCodeGen
 	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + (arrayExpr|structInit|(*expr).push().regist(NODE::SCALAR)).push()).regist(NODE::LET);
 	auto assign = ((arrayAccess|member|variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
 	auto primary = BNF("(")+(*compare).expect(BNF(")")) | intNum|floatNum| structInit|arrayExpr|arrayAccess.push().regist(NODE::ARRAY_ACCESS_LOAD) | member.push().regist(NODE::MEMBER_LOAD) | call | reference | variable|string;
@@ -813,7 +818,7 @@ int main(int args, char* argv[]) {
 	auto ret = (BNF("return") + (*expr).push()).regist(NODE::RETURN);
 	auto block = (BNF("{") + (*expr).expect(BNF(";")).push().loop() + BNF("}")).regist(NODE::BLOCK);
 	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push()[((BNF("elif") | BNF("else") + BNF("if"))[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
-	auto whileExpr = (BNF("while")[BNF("(")] + (*expr.push())[BNF(")")] + block.push()).regist(NODE::WHILE);
+	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr =ret|let|whileExpr|ifExpr|assign|compare|block ;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".")+BNF(".")+BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
 	auto function = (BNF("fn") + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")") + block.push()).regist(NODE::FUNCTION);
@@ -850,8 +855,9 @@ int main(int args, char* argv[]) {
 	codegen.codegen(program(iter));
 	codegen.getModule()->print(llvm::outs(), nullptr);
 	JIT engine(codegen.getModule());
-	llvm::outs() << engine.run().IntVal<<"\n";
-	llvm::outs()<<(int)engine.run().DoubleVal;
+	auto result = engine.run();
+	llvm::outs() << "result int:" << result.IntVal << "\n"
+		<< "result double:" << result.DoubleVal << "\n";
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
