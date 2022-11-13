@@ -290,25 +290,43 @@ public:
 };
 class Variables {
 private:
-	std::vector < std::unordered_map < std::string, llvm::Value* > > variables;
+	bool saveMode=true;
+	unsigned id = 0;
+	std::unordered_map<unsigned, unsigned> counter;
+	//std::vector<int> idCount;
+	//std::unordered_map<llvm::Value*, unsigned> a;
+	//std::unordered_map<std::string, unsigned> counter;
+	std::vector < std::unordered_map < std::string, std::pair<llvm::Value*,unsigned> > > variables;
+	std::function<void(std::string,llvm::Value*)> callback;
 public:
+	template <class T>
+	auto changeCallback(T callback) {
+		this->callback=std::move(callback);
+	}
+	auto setMode(decltype(saveMode) mode) {
+		id = 0;
+		saveMode = mode;
+	}
 	auto nest() {
 		variables.push_back({});
 	}
-	template <class... T>
-	auto insert_or_assign(T&&... constructor) {
-		variables.back().insert_or_assign(std::forward<T>(constructor)...);
+	template <class keyT,class valueT>
+	auto insert_or_assign(keyT&& key, valueT&& value) {
+		variables.back().insert_or_assign(std::forward<keyT>(key),std::make_pair(std::forward<valueT>(value),id));
+		counter.emplace(id,0);
+		++id;
 	}
 	auto& get(decltype(variables)::value_type::key_type name) {
 		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
 			if (!i->count(name))continue;
-			return i->at(name);;
-		}
-	}
-	template <class F>
-	auto forEach(F f) {
-		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
-			std::for_each(i->begin(),i->end(),f);
+			if (saveMode) {
+				++counter.at(i->at(name).second);			
+			}
+			else if (counter.count(i->at(name).second) && --counter.at(i->at(name).second) == 0) {
+			    callback(name, i->at(name).first);
+				counter.erase(i->at(name).second);
+			}
+			return i->at(name).first;
 		}
 	}
 	auto exitScope() {
@@ -322,28 +340,6 @@ enum class ACCESS {
 	PRIVATE,
 	PROTECTED
 };
-//class TryAccess {
-//private:
-//public:
-//	virtual void regist() = 0;
-//	virtual bool tryAccess(std::string) = 0;
-//};
-//class AccessPublic:public TryAccess{
-//private:
-//public:
-//	bool tryAccess(std::string) override{
-//		return true;
-//	}
-//};
-//class AccessPrivate :public TryAccess {
-//private:
-//	const std::string self;
-//public:
-//	AccessPrivate(decltype(self) self):self(std::move(self)){}
-//	bool tryAccess(std::string) override {
-//		return true;
-//	}
-//};
 class MemberInfo {
 private:
 	const ACCESS access;
@@ -400,6 +396,7 @@ private:
 	llvm::BasicBlock* retBlock;
 	Variables variables;
 	Classes classes;
+	std::stack<std::function<void()>> tasks;
 	std::unordered_map<std::string, std::unordered_map<std::string, unsigned> > structMember;
 public:
 	CodeGenerator() :
@@ -408,6 +405,10 @@ public:
 		typeAnalyzer(builder)
 	{
 		context.setOpaquePointers(false);
+	}
+	template <class T>
+	auto setDestructorCallback(T&& callback) {
+		variables.changeCallback(std::forward<T>(callback));
 	}
 	auto& getStructMember() {
 		return structMember;
@@ -437,10 +438,23 @@ public:
 	auto& getBuilder() {
 		return builder;
 	}
+	auto registTask(auto task) {
+		tasks.push(task);
+	}
 	llvm::Value* codegen(Node node) {
+		while (!tasks.empty()) {
+			tasks.top()();
+			tasks.pop();
+		}
 		return generators[node.node]->codegen(*this, node);
 	}
 };
+class NoneNode :public Codegen {
+public:
+	llvm::Value* codegen(CodeGenerator&, Node)override {
+		return nullptr;
+	}
+}; 
 class  TypeIdentNode {
 private:
 public:
@@ -669,8 +683,6 @@ public:
 		for (const auto& child : node.branch) {
 			result = cg.codegen(child);
 		}
-		const auto insertPoint = cg.getBuilder().GetInsertBlock();
-		cg.getBuilder().SetInsertPoint(cg.getRetBlock());
 		cg.getVariables().exitScope();
 		return result;
 	}
@@ -796,12 +808,18 @@ public:
 		};
 		if (node.branch[TYPE].branch.size()) {
 			cg.getRetType() = cg.getType()(node.branch[TYPE].linkBranchStr());
+			cg.getVariables().setMode(true);
+			createFunction();
+			cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
+			cg.getVariables().setMode(false);
 			createFunction();
 		}
 		else {
 			cg.getRetType() = cg.getBuilder().getVoidTy();
+			cg.getVariables().setMode(true);
 			createFunction();
 			cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
+			cg.getVariables().setMode(false);
 			createFunction();
 
 		}
@@ -852,7 +870,7 @@ public:
 		node.branch[CallNode::NAME].value += "_constructor";
 		node.node = NODE::CALL;
 		cg.codegen(node);
-		return cg.getVariables().exitScope().at(WORK_SPACE);
+		return cg.getVariables().exitScope().at(WORK_SPACE).first;
 	}
 };
 class MemberNode :public Codegen {
@@ -862,7 +880,8 @@ public:
 		OBJ,
 	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		auto getRawRetType = [&cg](std::string name) {
+		auto getRawRetType = [&cg](std::string &name) {
+			if (cg.getClasses().is_class(name))return cg.getType()(name);
 			if (cg.getModule()->getFunction(name)->getReturnType()->isPointerTy()) {
 				return cg.getModule()->getFunction(name)->getReturnType()->getNonOpaquePointerElementType();
 			}
@@ -877,15 +896,17 @@ public:
 		auto iter = node.branch.begin();
 		for (auto member = node.branch.begin(); member != node.branch.end(); ++member) {
 			if (member->node != NODE::CALL)continue;
-			member->branch[CallNode::NAME].value.insert(
-				0,
-				type->getStructName().str() + "_"
-			);
+			if (!cg.getClasses().is_class(member->branch[CallNode::NAME].value)&&!cg.getModule()->getFunction(member->branch[CallNode::NAME].value)) {
+				member->branch[CallNode::NAME].value.insert(
+					0,
+					type->getStructName().str() + "_"
+				);
+			}
 			Node self;
 			if (std::distance(iter, member) == 1) {
 				self = *iter;
 			}
-			else {
+			else{
 				self.node = NODE::MEMBER;
 				self.branch.insert(
 					self.branch.begin(),
@@ -893,10 +914,12 @@ public:
 					member
 				);
 			}
-			member->branch[CallNode::ARGUMENTS].branch.insert(
-				member->branch[CallNode::ARGUMENTS].branch.begin(),
-				self
-			);
+			if (std::distance(iter, member)) {
+				member->branch[CallNode::ARGUMENTS].branch.insert(
+					member->branch[CallNode::ARGUMENTS].branch.begin(),
+					self
+				);
+			}
 			iter = member;
 			type = getRawRetType(member->branch[CallNode::NAME].value);
 		}
@@ -1105,6 +1128,27 @@ int main(int args, char* argv[]) {
 	//auto constructor = (type.push() + call.push()).regist(NODE::CONSTRUCTOR);
 	auto program = (classExpr|structExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
 	CodeGenerator codegen;
+	codegen.setDestructorCallback([&codegen,&call](std::string name,llvm::Value* value) {
+		if (!(value &&
+			name!="0"&&
+			name!="this"&&
+			name!="return"&&
+			value->getType()->isPointerTy() &&
+			value->getType()->getNonOpaquePointerElementType()->isStructTy() &&
+			codegen.getClasses().is_class(std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str())))) {
+			return;
+		}
+		codegen.registTask(
+			[&codegen, value]() {
+				codegen.getBuilder().CreateCall(
+					codegen.getModule()->getFunction(
+						std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str()) + "_destructor"
+					),
+					{ value });
+			}
+		);
+		});
+	codegen.emplace<NoneNode>(NODE::NONE);
 	codegen.emplace<ExternNode>(NODE::EXTERN);
 	codegen.emplace<FunctionNode>(NODE::FUNCTION);
 	codegen.emplace<CallNode>(NODE::CALL);
@@ -1149,4 +1193,9 @@ constructor a(){}
 constructor(){}
 fn constructor(){}
 fn ClassName(){)}j
+*/
+/*
+アクセスをカウントする(関数の返り値推論のときに+して関数を作り替えるときに-していく。
+0になるとデストラクタが呼ばれる
+指定されたカウントが過ぎるとそこでデストラクタがよｂっるjkkj
 */
