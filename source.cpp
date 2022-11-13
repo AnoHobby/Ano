@@ -17,7 +17,11 @@
 #include <iostream>
 #include <iterator>
 #include <regex>
+#include <array>
 #include <unordered_map>
+inline constexpr auto makeArray(auto&&... args) {
+	return std::move(std::array< decltype(std::initializer_list{ args... })::value_type, sizeof...(args) > {args...});
+}
 class File {
 private:
 	const std::string name;
@@ -55,7 +59,7 @@ public:
 			};
 			if (
 				check(TOKEN::NUMBER, R"(^\d+)") ||
-				check(TOKEN::RESERVED, R"(^[&\[\];,\.\(\)+*/=\-<>{}])") ||
+				check(TOKEN::RESERVED, R"(^[&\[\];:,\.\(\)+*/=\-<>{}])") ||
 				check(TOKEN::IDENT, R"(^[a-zA-Z_][\w]*)") ||
 				check(TOKEN::STRING, "^\".*?[^\\\\]\"")
 				) {
@@ -99,6 +103,11 @@ enum class NODE {
 	MEMBER,
 	MEMBER_LOAD,
 	STRING,
+	CLASS,
+	MEMBER_REGIST,
+	CLASS_ACCESS,
+	CONSTRUCTOR,
+	DEFINE
 };
 class Node {
 private:
@@ -272,8 +281,11 @@ public:
 	auto emplace(decltype(types)::key_type key, decltype(types)::mapped_type value) {//todo:use this. using statement
 		types.emplace(key, value);
 	}
-	auto operator()(std::string str) {
-		return analyze(str);
+	auto erase(decltype(types)::key_type &&key) {
+		types.erase(std::forward<decltype(types)::key_type>(key));
+	}
+	auto operator()(const std::string str) {
+		return analyze(std::move(str));
 	}
 };
 class Variables {
@@ -293,10 +305,82 @@ public:
 			return i->at(name);;
 		}
 	}
+	template <class F>
+	auto forEach(F f) {
+		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
+			std::for_each(i->begin(),i->end(),f);
+		}
+	}
 	auto exitScope() {
 		auto variables = std::move(this->variables.back());
 		this->variables.pop_back();
 		return std::move(variables);
+	}
+};
+enum class ACCESS {
+	PUBLIC,
+	PRIVATE,
+	PROTECTED
+};
+//class TryAccess {
+//private:
+//public:
+//	virtual void regist() = 0;
+//	virtual bool tryAccess(std::string) = 0;
+//};
+//class AccessPublic:public TryAccess{
+//private:
+//public:
+//	bool tryAccess(std::string) override{
+//		return true;
+//	}
+//};
+//class AccessPrivate :public TryAccess {
+//private:
+//	const std::string self;
+//public:
+//	AccessPrivate(decltype(self) self):self(std::move(self)){}
+//	bool tryAccess(std::string) override {
+//		return true;
+//	}
+//};
+class MemberInfo {
+private:
+	const ACCESS access;
+	const unsigned offset;
+public:
+	MemberInfo(decltype(access) access, decltype(offset) offset) :access(access), offset(offset) {}
+	const auto& getOffset() const {
+		return offset;
+	}
+	const auto& getAccess()const{
+		return access;
+	}
+};
+class Member {
+private:
+	std::unordered_map<std::string, MemberInfo > member;//member->access,offset
+public:
+	auto emplace(decltype(member)::key_type key, ACCESS access) {
+		member.emplace(std::piecewise_construct, std::forward_as_tuple(std::move(key)), std::forward_as_tuple(access, member.size()));
+	}
+	const auto& get(decltype(member)::key_type key)const{
+		return member.at(std::move(key));
+	}
+};
+class Classes {
+private:
+
+	std::unordered_map<std::string, Member> classes;
+public:
+	auto emplace(decltype(classes)::key_type className,std::string memberName,ACCESS access) {
+		classes[std::move(className)].emplace(std::move(memberName), access);
+	}
+	const auto &getMember(std::string from, decltype(classes)::key_type className, std::string memberName)const{//ˆêŽž“I‚È•¨
+		return classes.at(std::move(className)).get(std::move(memberName));
+	}
+	bool is_class(decltype(classes)::key_type key) {
+		return classes.count(std::move(key));
 	}
 };
 class CodeGenerator;
@@ -314,8 +398,8 @@ private:
 	Type typeAnalyzer;
 	llvm::Type* retType;
 	llvm::BasicBlock* retBlock;
-	//std::unordered_map<std::string, llvm::Value*> variables;
 	Variables variables;
+	Classes classes;
 	std::unordered_map<std::string, std::unordered_map<std::string, unsigned> > structMember;
 public:
 	CodeGenerator() :
@@ -342,6 +426,9 @@ public:
 	}
 	auto& getModule() {
 		return mainModule;
+	}
+	auto& getClasses() {
+		return classes;
 	}
 	template <class T, class... ArgT>
 	auto emplace(decltype(generators)::key_type key, ArgT... args) {
@@ -544,6 +631,7 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		auto* value = cg.codegen(node.branch[0]);
+		if (value->getType()->isPointerTy())return value;
 		auto* variable = cg.getBuilder().CreateAlloca(value->getType());
 		cg.getBuilder().CreateStore(value, variable);
 		return variable;
@@ -552,9 +640,13 @@ public:
 class LetNode :public Codegen {
 private:
 public:
+	enum BRANCH {
+		NAME,
+		VALUE
+	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		cg.getVariables().insert_or_assign(node.branch[0].value, cg.codegen(node.branch[1]));
-		return cg.getVariables().get(node.branch[0].value);
+		cg.getVariables().insert_or_assign(node.branch[NAME].value, cg.codegen(node.branch[VALUE]));
+		return cg.getVariables().get(node.branch[NAME].value);
 	}
 };
 
@@ -577,6 +669,8 @@ public:
 		for (const auto& child : node.branch) {
 			result = cg.codegen(child);
 		}
+		const auto insertPoint = cg.getBuilder().GetInsertBlock();
+		cg.getBuilder().SetInsertPoint(cg.getRetBlock());
 		cg.getVariables().exitScope();
 		return result;
 	}
@@ -640,12 +734,9 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		llvm::Value* value = nullptr;
-		/*if (node.branch.empty() || !cg.getVariables().get("return")) {
-		}*/
-
-		if (!node.branch.empty()) {//empty‚ÌŽžcreateret nullptr‚Å‚à‚¢‚¢
+		if (!node.branch.empty()) {
 			value = cg.codegen(node.branch[0/*expression*/]);
-			cg.getRetType() = value->getType();//variables->gettype		    
+			cg.getRetType() = value->getType();
 			cg.getBuilder().CreateStore(value, cg.getVariables().get("return"));
 		}
 		cg.getBuilder().CreateBr(cg.getRetBlock());
@@ -717,6 +808,7 @@ public:
 		return cg.getModule()->getFunction(node.branch[NAME].value);
 	}
 };
+//operator()
 class CallNode :public Codegen {
 private:
 public:
@@ -725,12 +817,42 @@ public:
 		ARGUMENTS
 	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		if (cg.getClasses().is_class(node.branch[NAME].value)) {
+			node.node = NODE::CONSTRUCTOR;
+			return cg.codegen(node);
+		}
 		std::vector<llvm::Value*> args(node.branch[ARGUMENTS].branch.size());
 		for (auto i = 0; auto & arg:args) {
 			arg = cg.codegen(node.branch[ARGUMENTS].branch[i]);
 			++i;
 		}
 		return cg.getBuilder().CreateCall(cg.getModule()->getFunction(node.branch[NAME].value), args);
+	}
+};
+class DefineNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		return cg.getBuilder().CreateAlloca(cg.getType()(node.linkBranchStr()));
+	}
+};
+class ConstructorNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg,Node node)override {
+		constexpr auto WORK_SPACE = "0";
+		cg.getVariables().nest();
+		cg.getVariables().insert_or_assign(WORK_SPACE, cg.getBuilder().CreateAlloca(cg.getType()(node.branch[CallNode::NAME].value)));
+		node.branch[CallNode::ARGUMENTS].branch.insert(
+			node.branch[CallNode::ARGUMENTS].branch.begin(),
+			Node()
+		);
+		node.branch[CallNode::ARGUMENTS].branch.front().value = WORK_SPACE;
+		node.branch[CallNode::ARGUMENTS].branch.front().node = NODE::REFERENCE;
+		node.branch[CallNode::NAME].value += "_constructor";
+		node.node = NODE::CALL;
+		cg.codegen(node);
+		return cg.getVariables().exitScope().at(WORK_SPACE);
 	}
 };
 class MemberNode :public Codegen {
@@ -787,7 +909,24 @@ public:
 				value = cg.getBuilder().CreateStructGEP(
 					value->getType()->getNonOpaquePointerElementType(),
 					value,
-					cg.getStructMember()[value->getType()->getNonOpaquePointerElementType()->getStructName().str()][member.value]
+					[&] {
+						const auto name= value->getType()->getNonOpaquePointerElementType()->getStructName().str();
+						if (cg.getStructMember().count(name)) {
+							return cg.getStructMember()[name][member.value];
+						}
+						const auto obj=cg.getClasses().getMember("", name, member.value);
+						const auto parentName = std::move(cg.getBuilder().GetInsertBlock()->getParent()->getName().str());
+						if (
+							obj.getAccess()
+							==
+							ACCESS::PRIVATE&&
+							!std::equal(parentName.begin(),std::next(parentName.begin(),name.size()),name.begin(),name.end() )
+							)
+						{
+							throw "private member";
+						}
+						return obj.getOffset();
+					}()
 				);
 			});
 		return value;
@@ -806,24 +945,34 @@ public:
 		return cg.getBuilder().CreateLoad(member->getType()->getNonOpaquePointerElementType(), member);
 	}
 };
-class StructNode :public Codegen {
+class ClassNode :public Codegen {
 private:
 public:
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		constexpr auto STRUCT_MEMBERS = 1;
-		auto* structType = llvm::StructType::create(cg.getBuilder().getContext(), node.branch[0].value);
-		cg.getType().emplace(structType->getName().str(), structType);
+	enum BRANCH {
+		NAME,
+		MEMBERS
+	};
+	llvm::Value* codegen(CodeGenerator &cg, Node node)override {
+		auto* structType = llvm::StructType::create(cg.getBuilder().getContext(), node.branch[NAME].value);
 		std::vector <llvm::Type* > types;
-		cg.getStructMember().emplace(structType->getName().str(), std::unordered_map<std::string, unsigned>{});
-		for (unsigned hash = 0; auto & member : node.branch[STRUCT_MEMBERS].branch) {
-			if (member.node != NODE::FUNCTION) {
-				types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
-				cg.getStructMember()[structType->getName().str()].emplace(member.branch[TypeIdentNode::NAME].value, hash);
-				++hash;
+		cg.getType().emplace(structType->getName().str(), structType);
+		for (ACCESS access; auto & member : node.branch[MEMBERS].branch) {
+			if (member.node == NODE::CLASS_ACCESS) {
+				access=std::unordered_map<decltype(member.value), ACCESS>{
+					{"public", ACCESS::PUBLIC},
+					{ "private",ACCESS::PRIVATE },
+					{ "protected",ACCESS::PROTECTED },
+				}.at(member.branch.front().value);
+				continue;
 			}
+			if (member.node != NODE::MEMBER_REGIST) {
+				continue;
+			}
+			types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
+			cg.getClasses().emplace(node.branch[NAME].value, member.branch[TypeIdentNode::NAME].value,access);
 		}
 		structType->setBody(types, false);
-		for (auto& member : node.branch[STRUCT_MEMBERS].branch) {
+		for (auto& member : node.branch[MEMBERS].branch) {
 			if (member.node != NODE::FUNCTION)continue;
 			member.branch[FunctionNode::NAME].value.insert(
 				0,
@@ -840,6 +989,46 @@ public:
 			);
 			cg.codegen(member);
 		}
+	}
+};
+class StructNode :public Codegen {
+private:
+public:
+	enum BRANCH {
+		NAME,
+		MEMBERS
+	};
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		auto* structType = llvm::StructType::create(cg.getBuilder().getContext(), node.branch[NAME].value);
+		cg.getType().emplace(structType->getName().str(), structType);
+		std::vector <llvm::Type* > types;
+		cg.getStructMember().emplace(structType->getName().str(), std::unordered_map<std::string, unsigned>{});
+		for (unsigned hash = 0; auto & member : node.branch[MEMBERS].branch) {
+			if (member.node != NODE::FUNCTION) {
+				types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
+				cg.getStructMember()[structType->getName().str()].emplace(member.branch[TypeIdentNode::NAME].value, hash);
+				++hash;
+			}
+		}
+		structType->setBody(types, false);
+		for (auto& member : node.branch[MEMBERS].branch) {
+			if (member.node != NODE::FUNCTION)continue;
+			member.branch[FunctionNode::NAME].value.insert(
+				0,
+				structType->getName().str() + "_"
+			);
+			Node self;
+			self.branch.resize(2/*TypeIdentNode branch max size*/);
+			self.branch.front().branch.resize(1);
+			self.branch.front().branch.front().value = structType->getName().str() + "*";
+			self.branch[TypeIdentNode::NAME].value = "this";
+			member.branch[FunctionNode::ARGUMENTS].branch.emplace(//push_back is ok
+				member.branch[FunctionNode::ARGUMENTS].branch.begin(),
+				self
+			);
+			cg.codegen(member);
+		}
+		
 	}
 };
 class ExternNode :public Codegen {
@@ -894,10 +1083,10 @@ int main(int args, char* argv[]) {
 	auto arrayAccess = (variable.regist(NODE::REFERENCE).push() + (BNF("[") + (*expr).push() + BNF("]")).loop().push()).regist(NODE::ARRAY_ACCESS);
 	auto member = ((call | variable.regist(NODE::REFERENCE)).push() + ((BNF(".") + (call | variable.regist(NODE::REFERENCE))).push().loop())).regist(NODE::MEMBER);
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
-	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") + ((variable.push() + (*expr).push()).push()[BNF(",")]).loop().push() + BNF("}")).regist(NODE::STRUCT_INIT);
+	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") [((variable.push() +BNF(":") + (*expr).push()).push()[BNF(",")]).loop()].push() + BNF("}")).regist(NODE::STRUCT_INIT);
 	BNF  add;
 	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);
-	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + (arrayExpr | structInit | (*expr).push().regist(NODE::SCALAR)).push()).regist(NODE::LET);
+	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + ((*expr).push().regist(NODE::SCALAR)).push()).regist(NODE::LET);
 	auto assign = ((arrayAccess | member | variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
 	auto primary = BNF("(") + (*compare).expect(BNF(")")) | intNum | floatNum | structInit | arrayExpr | arrayAccess.push().regist(NODE::ARRAY_ACCESS_LOAD) | member.push().regist(NODE::MEMBER_LOAD) | call | reference | variable | string;
 	auto mul = (primary.push() + (BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
@@ -909,8 +1098,12 @@ int main(int args, char* argv[]) {
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
 	auto function = (BNF("fn") + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + block.push()).regist(NODE::FUNCTION);
-	auto structExpr = (BNF("struct") + BNF(TOKEN::IDENT).push() + BNF("{") + ((type.push() + BNF(TOKEN::IDENT).push() + BNF(";")) | function).push().loop().push() + BNF("}")).regist(NODE::STRUCT);
-	auto program = (structExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
+	auto memberRegist = (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).regist(NODE::MEMBER_REGIST);
+	auto structExpr = (BNF("struct") + BNF(TOKEN::IDENT).push() + BNF("{")[(memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::STRUCT);
+	auto accessExpr = ((BNF("private") | BNF("public") | BNF("protected")).push() + BNF(":")).regist(NODE::CLASS_ACCESS);
+	auto classExpr = (BNF("class") + BNF(TOKEN::IDENT).push() + BNF("{")[accessExpr.push() + (accessExpr | memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::CLASS);
+	//auto constructor = (type.push() + call.push()).regist(NODE::CONSTRUCTOR);
+	auto program = (classExpr|structExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
 	CodeGenerator codegen;
 	codegen.emplace<ExternNode>(NODE::EXTERN);
 	codegen.emplace<FunctionNode>(NODE::FUNCTION);
@@ -920,6 +1113,8 @@ int main(int args, char* argv[]) {
 	codegen.emplace<StringNode>(NODE::STRING);
 	codegen.emplace<DoubleNode>(NODE::FLOATING_POINT);
 	codegen.emplace<IntNode>(NODE::INT);
+	codegen.emplace<ClassNode>(NODE::CLASS);
+	codegen.emplace<ConstructorNode>(NODE::CONSTRUCTOR);
 	codegen.emplace<StructNode>(NODE::STRUCT);
 	codegen.emplace<StructInitNode>(NODE::STRUCT_INIT);
 	codegen.emplace<MemberNode>(NODE::MEMBER);
@@ -929,6 +1124,7 @@ int main(int args, char* argv[]) {
 	codegen.emplace<VariableNode>(NODE::VARIABLE);
 	codegen.emplace<ReferenceNode>(NODE::REFERENCE);
 	codegen.emplace<LetNode>(NODE::LET);
+	codegen.emplace<DefineNode>(NODE::DEFINE);
 	codegen.emplace<AssignNode>(NODE::ASSIGN);
 	codegen.emplace<LessNode>(NODE::LESS);
 	codegen.emplace<AddNode>(NODE::ADD);
@@ -948,3 +1144,9 @@ int main(int args, char* argv[]) {
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
+/*
+constructor a(){}
+constructor(){}
+fn constructor(){}
+fn ClassName(){)}j
+*/
