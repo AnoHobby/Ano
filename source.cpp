@@ -293,10 +293,8 @@ private:
 	bool saveMode=true;
 	unsigned id = 0;
 	std::unordered_map<unsigned, unsigned> counter;
-	//std::vector<int> idCount;
-	//std::unordered_map<llvm::Value*, unsigned> a;
-	//std::unordered_map<std::string, unsigned> counter;
-	std::vector < std::unordered_map < std::string, std::pair<llvm::Value*,unsigned> > > variables;
+	std::vector < std::unordered_map < std::string, llvm::Value* > > variables;
+	std::unordered_map<llvm::Value*, unsigned> convertID;
 	std::function<void(std::string,llvm::Value*)> callback;
 public:
 	template <class T>
@@ -305,6 +303,7 @@ public:
 	}
 	auto setMode(decltype(saveMode) mode) {
 		id = 0;
+		convertID.clear();
 		saveMode = mode;
 	}
 	auto nest() {
@@ -312,7 +311,8 @@ public:
 	}
 	template <class keyT,class valueT>
 	auto insert_or_assign(keyT&& key, valueT&& value) {
-		variables.back().insert_or_assign(std::forward<keyT>(key),std::make_pair(std::forward<valueT>(value),id));
+		convertID.emplace(value,id);
+		variables.back().insert_or_assign(std::forward<keyT>(key),std::forward<valueT>(value));
 		counter.emplace(id,0);
 		++id;
 	}
@@ -320,13 +320,13 @@ public:
 		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
 			if (!i->count(name))continue;
 			if (saveMode) {
-				++counter.at(i->at(name).second);			
+				++counter.at(convertID.at(i->at(name)));			
 			}
-			else if (counter.count(i->at(name).second) && --counter.at(i->at(name).second) == 0) {
-			    callback(name, i->at(name).first);
-				counter.erase(i->at(name).second);
+			else if (counter.count(convertID.at(i->at(name))) && --counter.at(convertID.at(i->at(name))) == 0) {
+			    callback(name, i->at(name));
+				counter.erase(convertID.at(i->at(name)));
 			}
-			return i->at(name).first;
+			return i->at(name);
 		}
 	}
 	auto exitScope() {
@@ -399,6 +399,7 @@ private:
 	std::stack<std::function<void()>> tasks;
 	std::unordered_map<std::string, std::unordered_map<std::string, unsigned> > structMember;
 public:
+	static constexpr auto WORK_SPACE = "0";
 	CodeGenerator() :
 		mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
 		builder(context),
@@ -668,7 +669,7 @@ class AssignNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateStore(
+		return cg.getBuilder().CreateStore(//variablesの値を変えるだけでもいいかも
 			cg.codegen(node.branch[1]),
 			cg.codegen(node.branch[0])
 		);
@@ -749,7 +750,7 @@ public:
 		if (!node.branch.empty()) {
 			value = cg.codegen(node.branch[0/*expression*/]);
 			cg.getRetType() = value->getType();
-			cg.getBuilder().CreateStore(value, cg.getVariables().get("return"));
+			cg.getBuilder().CreateStore(value, cg.getVariables().get(cg.WORK_SPACE));
 		}
 		cg.getBuilder().CreateBr(cg.getRetBlock());
 		//afterは一つだけでもいい
@@ -797,32 +798,26 @@ public:
 			}
 			cg.getRetBlock() = llvm::BasicBlock::Create(cg.getBuilder().getContext(),"return", cg.getBuilder().GetInsertBlock()->getParent());
 			cg.getVariables().nest();
-			cg.getVariables().insert_or_assign("return",cg.getRetType()==cg.getBuilder().getVoidTy() ? nullptr:cg.getBuilder().CreateAlloca(cg.getRetType()));
+			cg.getVariables().insert_or_assign(cg.WORK_SPACE,cg.getRetType()==cg.getBuilder().getVoidTy() ? nullptr:cg.getBuilder().CreateAlloca(cg.getRetType()));
 			cg.codegen(node.branch[BLOCK]);
 			cg.getBuilder().SetInsertPoint(cg.getRetBlock());
 			Node node;
 			node.node = NODE::VARIABLE;
-			node.value = "return";
-			cg.getBuilder().CreateRet(cg.getVariables().get("return") ? cg.codegen(node):nullptr);
+			node.value = cg.WORK_SPACE;
+			cg.getBuilder().CreateRet(cg.getVariables().get(cg.WORK_SPACE) ? cg.codegen(node):nullptr);
 			cg.getVariables().exitScope();
 		};
 		if (node.branch[TYPE].branch.size()) {
 			cg.getRetType() = cg.getType()(node.branch[TYPE].linkBranchStr());
-			cg.getVariables().setMode(true);
-			createFunction();
-			cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
-			cg.getVariables().setMode(false);
-			createFunction();
 		}
 		else {
 			cg.getRetType() = cg.getBuilder().getVoidTy();
-			cg.getVariables().setMode(true);
-			createFunction();
-			cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
-			cg.getVariables().setMode(false);
-			createFunction();
-
 		}
+		cg.getVariables().setMode(true);
+		createFunction();
+		cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
+		cg.getVariables().setMode(false);
+		createFunction();
 		return cg.getModule()->getFunction(node.branch[NAME].value);
 	}
 };
@@ -858,19 +853,18 @@ class ConstructorNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg,Node node)override {
-		constexpr auto WORK_SPACE = "0";
 		cg.getVariables().nest();
-		cg.getVariables().insert_or_assign(WORK_SPACE, cg.getBuilder().CreateAlloca(cg.getType()(node.branch[CallNode::NAME].value)));
+		cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getBuilder().CreateAlloca(cg.getType()(node.branch[CallNode::NAME].value)));
 		node.branch[CallNode::ARGUMENTS].branch.insert(
 			node.branch[CallNode::ARGUMENTS].branch.begin(),
 			Node()
 		);
-		node.branch[CallNode::ARGUMENTS].branch.front().value = WORK_SPACE;
+		node.branch[CallNode::ARGUMENTS].branch.front().value = cg.WORK_SPACE;
 		node.branch[CallNode::ARGUMENTS].branch.front().node = NODE::REFERENCE;
 		node.branch[CallNode::NAME].value += "_constructor";
 		node.node = NODE::CALL;
 		cg.codegen(node);
-		return cg.getVariables().exitScope().at(WORK_SPACE).first;
+		return cg.getVariables().exitScope().at(cg.WORK_SPACE);
 	}
 };
 class MemberNode :public Codegen {
@@ -1125,14 +1119,11 @@ int main(int args, char* argv[]) {
 	auto structExpr = (BNF("struct") + BNF(TOKEN::IDENT).push() + BNF("{")[(memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::STRUCT);
 	auto accessExpr = ((BNF("private") | BNF("public") | BNF("protected")).push() + BNF(":")).regist(NODE::CLASS_ACCESS);
 	auto classExpr = (BNF("class") + BNF(TOKEN::IDENT).push() + BNF("{")[accessExpr.push() + (accessExpr | memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::CLASS);
-	//auto constructor = (type.push() + call.push()).regist(NODE::CONSTRUCTOR);
 	auto program = (classExpr|structExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
 	CodeGenerator codegen;
 	codegen.setDestructorCallback([&codegen,&call](std::string name,llvm::Value* value) {
 		if (!(value &&
-			name!="0"&&
 			name!="this"&&
-			name!="return"&&
 			value->getType()->isPointerTy() &&
 			value->getType()->getNonOpaquePointerElementType()->isStructTy() &&
 			codegen.getClasses().is_class(std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str())))) {
@@ -1188,14 +1179,3 @@ int main(int args, char* argv[]) {
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
-/*
-constructor a(){}
-constructor(){}
-fn constructor(){}
-fn ClassName(){)}j
-*/
-/*
-アクセスをカウントする(関数の返り値推論のときに+して関数を作り替えるときに-していく。
-0になるとデストラクタが呼ばれる
-指定されたカウントが過ぎるとそこでデストラクタがよｂっるjkkj
-*/
