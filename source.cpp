@@ -216,12 +216,12 @@ public:
 			if (node.node == NODE::NONE)return  node;
 			auto branch = node.branch;
 			Node before;
-			while ((before = parser(iter)).node != NODE::NONE) {
-				node = before;
-				node.branch.insert(node.branch.begin(), branch.begin(), branch.end());
-				branch = node.branch;
-			}
-			return node;
+while ((before = parser(iter)).node != NODE::NONE) {
+	node = before;
+	node.branch.insert(node.branch.begin(), branch.begin(), branch.end());
+	branch = node.branch;
+}
+return node;
 			});
 	}
 	auto operator*() {
@@ -281,7 +281,7 @@ public:
 	auto emplace(decltype(types)::key_type key, decltype(types)::mapped_type value) {//todo:use this. using statement
 		types.emplace(key, value);
 	}
-	auto erase(decltype(types)::key_type &&key) {
+	auto erase(decltype(types)::key_type&& key) {
 		types.erase(std::forward<decltype(types)::key_type>(key));
 	}
 	auto operator()(const std::string str) {
@@ -290,16 +290,19 @@ public:
 };
 class Variables {
 private:
-	bool saveMode=true;
+	bool saveMode = true;
+	bool historyMode = false;
 	unsigned id = 0;
 	std::unordered_map<unsigned, unsigned> counter;
 	std::vector < std::unordered_map < std::string, llvm::Value* > > variables;
 	std::unordered_map<llvm::Value*, unsigned> convertID;
-	std::function<void(std::string,llvm::Value*)> callback;
+	std::function<void(std::string, llvm::Value*)> callback;
+	std::vector<std::pair<unsigned, std::string> > histories;
 public:
+	static constexpr auto DEPTH_NOT_FOUND = -1;
 	template <class T>
 	auto changeCallback(T callback) {
-		this->callback=std::move(callback);
+		this->callback = std::move(callback);
 	}
 	auto setMode(decltype(saveMode) mode) {
 		id = 0;
@@ -309,24 +312,84 @@ public:
 	auto nest() {
 		variables.push_back({});
 	}
-	template <class keyT,class valueT>
+	const unsigned getCounter(const unsigned depth,const std::string &name) const{
+		if (!counter.count(convertID.at(variables[depth].at(name))))return 0;
+		return counter.at(convertID.at(variables[depth].at(name)));
+	}
+	const auto getCount() const{
+		auto count = 0;
+		for (const auto& block : variables) {
+			for (const auto& [name, value] : block) {
+				count += counter.count(convertID.at(value));
+			}
+		}
+		return count;
+	}
+	const auto history(bool on) {
+		if(historyMode = on){//if nakutemoii
+			histories.clear();
+		}
+	}
+	const auto& getHistoryMode() {
+		return historyMode;
+	}
+	auto findDeleted(const Variables& after)const{
+		std::vector<std::string> result;
+		for (auto i = 0; const auto & block : variables) {
+			for (const auto& [name, value] : block) {
+				if (!getCounter(i,name) || after.getCounter(i, name))continue;
+				result.push_back(std::to_string(i)+"_" + name);
+			}
+			++i;
+		}
+		return std::move(result);
+	}
+	template <class keyT, class valueT>
 	auto insert_or_assign(keyT&& key, valueT&& value) {
-		convertID.emplace(value,id);
-		variables.back().insert_or_assign(std::forward<keyT>(key),std::forward<valueT>(value));
-		counter.emplace(id,0);
+		convertID.emplace(value, id);
+		variables.back().insert_or_assign(std::forward<keyT>(key), std::forward<valueT>(value));
+		counter.emplace(id, 0);
 		++id;
 	}
-	auto& get(decltype(variables)::value_type::key_type name) {
+	auto getNestCount() {
+		return variables.size() - 1;
+	}
+	int getDepth(decltype(variables)::value_type::key_type name) {
+		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
+			if (!i->count(name))continue;
+			return getNestCount() - std::distance(variables.rbegin(), i);
+		}
+		return DEPTH_NOT_FOUND;//variables.size()->not found
+	}
+	auto useHistory() {
+		return std::move(histories);
+	}
+	auto &get(decltype(variables)::value_type::key_type name) {
 		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
 			if (!i->count(name))continue;
 			if (saveMode) {
 				++counter.at(convertID.at(i->at(name)));			
 			}
 			else if (counter.count(convertID.at(i->at(name))) && --counter.at(convertID.at(i->at(name))) == 0) {
-			    callback(name, i->at(name));
+				callback(name, i->at(name));
 				counter.erase(convertID.at(i->at(name)));
+
+			}
+			if (historyMode) {
+				histories.push_back(std::make_pair(variables.size()-1-std::distance(variables.rbegin(),i),name));
 			}
 			return i->at(name);
+		}
+	}
+	auto destroy(std::size_t depth,std::string name) {
+		callback(name, variables[depth].at(name));
+	}
+	auto forEachCallback() {
+		for (auto i = variables.rbegin(); i != variables.rend(); ++i) {
+			for (const auto& [name,value] : *i) {
+				if (!counter.count(convertID.at(value)))continue;
+				callback(name,value);
+			}
 		}
 	}
 	auto exitScope() {
@@ -386,6 +449,8 @@ public:
 	virtual llvm::Value* codegen(CodeGenerator&, Node) = 0;
 };
 class CodeGenerator {
+public:
+	static constexpr auto NOT_LOOP = -1;
 private:
 	std::unordered_map<NODE, std::unique_ptr<Codegen> > generators;
 	llvm::LLVMContext context;
@@ -396,8 +461,9 @@ private:
 	llvm::BasicBlock* retBlock;
 	Variables variables;
 	Classes classes;
-	std::stack<std::function<void()>> tasks;
+	std::stack<std::function<bool()>> tasks;
 	std::unordered_map<std::string, std::unordered_map<std::string, unsigned> > structMember;
+	int loop=NOT_LOOP;
 public:
 	static constexpr auto WORK_SPACE = "0";
 	CodeGenerator() :
@@ -410,6 +476,9 @@ public:
 	template <class T>
 	auto setDestructorCallback(T&& callback) {
 		variables.changeCallback(std::forward<T>(callback));
+	}
+	auto& getLoop() {
+		return loop;
 	}
 	auto& getStructMember() {
 		return structMember;
@@ -442,11 +511,14 @@ public:
 	auto registTask(auto task) {
 		tasks.push(task);
 	}
-	llvm::Value* codegen(Node node) {
+	auto tryTask() {
 		while (!tasks.empty()) {
-			tasks.top()();
+			if (!tasks.top()())break;//false->未処理,true->処理後
 			tasks.pop();
 		}
+	}
+	llvm::Value* codegen(Node node) {
+		tryTask();
 		return generators[node.node]->codegen(*this, node);
 	}
 };
@@ -505,8 +577,8 @@ public:
 class StringNode :public Codegen {
 private:
 public:
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateGlobalStringPtr(node.value.substr(1, node.value.size() - 2));
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {// //->/
+		return cg.getBuilder().CreateGlobalStringPtr(std::regex_replace(node.value.substr(1, node.value.size() - 2), std::regex(R"(\\n)"), "\n"));
 	}
 };
 class DoubleNode :public Codegen {
@@ -574,8 +646,11 @@ public:
 class ReferenceNode :public Codegen {
 private:
 public:
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getVariables().get(node.value);
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {//get->not found module->getfunction
+		//if (!cg.getModule()->getFunction(node.value)) {
+			return cg.getVariables().get(node.value);
+		//}
+		//return cg.getModule()->getFunction(node.value);
 	}
 };
 class StructInitNode :public Codegen {
@@ -680,10 +755,11 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		cg.getVariables().nest();
+
 		llvm::Value* result;
 		for (const auto& child : node.branch) {
 			result = cg.codegen(child);
-		}
+		}//trytask
 		cg.getVariables().exitScope();
 		return result;
 	}
@@ -692,54 +768,152 @@ class IfNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		std::vector<llvm::BasicBlock*> blocks;
-		for (auto i = 0; i <= node.branch.size(); ++i) {
-			blocks.push_back(llvm::BasicBlock::Create(cg.getBuilder().getContext(), "ifBlock", cg.getBuilder().GetInsertBlock()->getParent()));
+	    std::unordered_map<std::string,unsigned> used,ifUsed,elseUsed;
+		auto ifBlock = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "if", cg.getBuilder().GetInsertBlock()->getParent()),
+			elseBlock = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "else", cg.getBuilder().GetInsertBlock()->getParent());
+		const auto after = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "after", cg.getBuilder().GetInsertBlock()->getParent());
+		const auto save = cg.getBuilder().saveIP();
+		const auto history = cg.getVariables();
+		cg.getVariables().history(true);
+		if (cg.getLoop() == cg.NOT_LOOP) {
+			std::cout << "if" << std::endl;
+			cg.registTask([&cg, &used] {
+				for (const auto& [depth, name] : cg.getVariables().useHistory()) {
+					used.insert_or_assign(std::to_string(depth) + "_" + name, cg.getVariables().getCounter(depth, name));
+				}
+				return !cg.getVariables().getHistoryMode();
+				});
 		}
-		llvm::BasicBlock* before;
-		for (auto i = 0; i < blocks.size() - 1 - (node.branch[node.branch.size() - 1].branch.size() == 1); ++i) {
-			before = node.branch.size() == 1 ? blocks.back() : llvm::BasicBlock::Create(cg.getBuilder().getContext(), "branch", cg.getBuilder().GetInsertBlock()->getParent());
+		cg.getBuilder().SetInsertPoint(ifBlock);
+		cg.codegen(node.branch[0].branch[1]);
+		cg.getBuilder().CreateBr(after);
+		ifUsed=std::move(used);
+		cg.getBuilder().SetInsertPoint(elseBlock);
+		cg.codegen(node.branch[1]);
+		cg.getBuilder().CreateBr(after);
+		elseUsed=std::move(used);
+		cg.getVariables().history(false);
+		if (cg.getLoop()!=cg.NOT_LOOP || !history.findDeleted(cg.getVariables()).size()) {
+			cg.getBuilder().restoreIP(save);
 			cg.getBuilder().CreateCondBr(
-				cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[i].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifcond"),
-				blocks[i],
-				before
+				cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifcond"),
+				ifBlock,
+				elseBlock
 			);
-			cg.getBuilder().SetInsertPoint(before);
+			cg.getBuilder().SetInsertPoint(after);
+			return nullptr;
 		}
-		if (node.branch[node.branch.size() - 1].branch.size() == 1) {
-			cg.getBuilder().CreateBr(blocks[blocks.size() - 2]);
-		}
-		for (auto i = 0; i < blocks.size() - 1 - (node.branch[node.branch.size() - 1].branch.size() == 1); ++i) {
-			cg.getBuilder().SetInsertPoint(blocks[i]);
-			cg.codegen(node.branch[i].branch[1]);
-			cg.getBuilder().CreateBr(blocks.back());
-		}
-		if (node.branch[node.branch.size() - 1].branch.size() == 1) {
-			cg.getBuilder().SetInsertPoint(blocks[blocks.size() - 2]);
-			cg.codegen(node.branch[node.branch.size() - 1]);
-			cg.getBuilder().CreateBr(blocks.back());
-		}
-		cg.getBuilder().SetInsertPoint(blocks.back());
+		ifBlock->eraseFromParent();
+		elseBlock->eraseFromParent();
+		ifBlock = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "if", after->getParent()),
+			elseBlock = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "else", after->getParent());
+		cg.getBuilder().restoreIP(save);
+		cg.getBuilder().CreateCondBr(
+			cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifcond"),
+			ifBlock,
+			elseBlock
+		);
+		bool branch=true;
+		const auto deleted = history.findDeleted(cg.getVariables());
+		cg.registTask([&branch,&cg,deleted=deleted,&ifUsed,destructed=decltype(deleted)()]()mutable {
+			for (auto i = 0; const auto & variable:deleted){
+				if (
+					!ifUsed.count(variable) && std::ranges::find(destructed, variable) == destructed.end()
+					||
+					ifUsed.at(variable) == cg.getVariables().getCounter(std::stoi(variable.substr(0, variable.find('_'))), variable.substr(variable.find("_") + 1))
+					) 
+				{
+					if(!ifUsed.count(variable) || (ifUsed.count(variable) && ifUsed.at(variable)))
+						cg.getVariables().destroy(std::stoi(variable.substr(0, variable.find('_'))), variable.substr(variable.find("_") + 1));
+					destructed.push_back(std::move(variable));
+					deleted.erase(deleted.begin()+i);
+					cg.tryTask();
+					return !branch;
+				}
+				++i;
+			}
+			return !branch;
+			});
+		cg.getVariables() = history;
+		cg.getBuilder().SetInsertPoint(ifBlock);
+		cg.codegen(node.branch[0].branch[1]);
+		cg.getBuilder().CreateBr(after);
+		branch = false;
+		cg.tryTask();
+		branch = true;
+		cg.registTask([&branch, &cg, deleted = deleted, &elseUsed, destructed = decltype(deleted)()]()mutable {
+			for (auto i = 0; const auto & variable:deleted) {
+				if (
+					!elseUsed.count(variable) && std::ranges::find(destructed, variable) == destructed.end()
+					||
+					elseUsed.at(variable) == cg.getVariables().getCounter(std::stoi(variable.substr(0, variable.find('_'))), variable.substr(variable.find("_") + 1))
+					)
+				{
+					if (!elseUsed.count(variable) || (elseUsed.count(variable) && elseUsed.at(variable)))
+					cg.getVariables().destroy(std::stoi(variable.substr(0, variable.find('_'))), variable.substr(variable.find("_") + 1));
+					destructed.push_back(std::move(variable));
+					deleted.erase(deleted.begin() + i);
+					cg.tryTask();
+					return !branch;
+				}
+				++i;
+			}
+			return !branch;
+			});
+		cg.getBuilder().SetInsertPoint(elseBlock);
+		cg.codegen(node.branch[1]);
+		cg.getBuilder().CreateBr(after);
+		branch = false;
+		cg.tryTask();
+		cg.getBuilder().SetInsertPoint(after);
 	}
 };
 class WhileNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		auto* loop = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "loop", cg.getBuilder().GetInsertBlock()->getParent());
-		auto* then = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "then", cg.getBuilder().GetInsertBlock()->getParent());
+		const auto before= std::exchange(cg.getLoop(),cg.getVariables().getNestCount()) ;
+		auto* loop = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "comp", cg.getBuilder().GetInsertBlock()->getParent());
+		auto* then = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "loop", cg.getBuilder().GetInsertBlock()->getParent());
 		auto* after = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "afterLoop", cg.getBuilder().GetInsertBlock()->getParent());
 		cg.getBuilder().CreateBr(loop);
 		cg.getBuilder().SetInsertPoint(loop);
+		cg.getVariables().nest();
 		cg.getBuilder().CreateCondBr(
 			cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "loopCond"),
 			then,
 			after
 		);
 		cg.getBuilder().SetInsertPoint(then);
+
+		auto stackSave=cg.getBuilder().CreateCall(
+		cg.getModule()->getOrInsertFunction(
+			"llvm.stacksave",
+			llvm::FunctionType::get(
+				cg.getBuilder().getInt8PtrTy(),//return type
+				{}
+				, false
+			)
+		)
+		);
 		cg.codegen(node.branch[1]);
+		cg.getBuilder().CreateCall(
+			cg.getModule()->getOrInsertFunction(
+				"llvm.stackrestore",
+				llvm::FunctionType::get(
+					cg.getBuilder().getVoidTy(),//return type
+					{cg.getBuilder().getInt8PtrTy()}
+					, false
+				)
+			),
+			{stackSave}
+		);
+
+		cg.getVariables().exitScope();//loopのconpで一度比較されてからデストラクタが呼ばれてしまうのを阻止するv
 		cg.getBuilder().CreateBr(loop);
 		cg.getBuilder().SetInsertPoint(after);
+		cg.getLoop() = before;
+
 	}
 };
 class RetNode :public Codegen {
@@ -752,8 +926,9 @@ public:
 			cg.getRetType() = value->getType();
 			cg.getBuilder().CreateStore(value, cg.getVariables().get(cg.WORK_SPACE));
 		}
+		cg.getVariables().forEachCallback();
+		cg.tryTask();
 		cg.getBuilder().CreateBr(cg.getRetBlock());
-		//afterは一つだけでもいい
 		cg.getBuilder().SetInsertPoint(llvm::BasicBlock::Create(cg.getBuilder().getContext(),"after",cg.getBuilder().GetInsertBlock()->getParent()));
 		return value;
 	}
@@ -780,6 +955,9 @@ public:
 						llvm::ArrayRef(args), false),
 					llvm::Function::ExternalLinkage, node.branch[NAME].value, *cg.getModule())
 			));
+
+			//cg.getVariables().insert_or_assign(node.branch[NAME].value,cg.getBuilder().GetInsertBlock()->getParent());
+			cg.getVariables().nest();
 			for (auto i = 0; auto & arg : cg.getModule()->getFunction(node.branch[NAME].value)->args()) {
 				if (arg.getType()->isPointerTy()) {
 					cg.getVariables().insert_or_assign(
@@ -798,13 +976,14 @@ public:
 			}
 			cg.getRetBlock() = llvm::BasicBlock::Create(cg.getBuilder().getContext(),"return", cg.getBuilder().GetInsertBlock()->getParent());
 			cg.getVariables().nest();
-			cg.getVariables().insert_or_assign(cg.WORK_SPACE,cg.getRetType()==cg.getBuilder().getVoidTy() ? nullptr:cg.getBuilder().CreateAlloca(cg.getRetType()));
+			cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getRetType() == cg.getBuilder().getVoidTy() ? nullptr : cg.getBuilder().CreateAlloca(cg.getRetType()));
 			cg.codegen(node.branch[BLOCK]);
 			cg.getBuilder().SetInsertPoint(cg.getRetBlock());
 			Node node;
 			node.node = NODE::VARIABLE;
 			node.value = cg.WORK_SPACE;
 			cg.getBuilder().CreateRet(cg.getVariables().get(cg.WORK_SPACE) ? cg.codegen(node):nullptr);
+			cg.getVariables().exitScope();
 			cg.getVariables().exitScope();
 		};
 		if (node.branch[TYPE].branch.size()) {
@@ -817,6 +996,9 @@ public:
 		createFunction();
 		cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
 		cg.getVariables().setMode(false);
+		if (node.branch[TYPE].branch.size()) {
+			cg.getRetType() = cg.getType()(node.branch[TYPE].linkBranchStr());
+		}
 		createFunction();
 		return cg.getModule()->getFunction(node.branch[NAME].value);
 	}
@@ -1110,7 +1292,8 @@ int main(int args, char* argv[]) {
 	add = (mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
 	auto ret = (BNF("return")[(*expr).push()]).regist(NODE::RETURN);
 	auto block = (BNF("{")[(((*expr).push() + BNF(";")) | BNF(";")).loop()] + BNF("}")).regist(NODE::BLOCK);
-	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()[((BNF("elif") | BNF("else") + BNF("if"))[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
+	//auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()[((BNF("elif") | BNF("else") + BNF("if"))[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
+	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()[BNF("else") + block.push()]).regist(NODE::IF);
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
@@ -1122,13 +1305,15 @@ int main(int args, char* argv[]) {
 	auto program = (classExpr|structExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
 	CodeGenerator codegen;
 	codegen.setDestructorCallback([&codegen,&call](std::string name,llvm::Value* value) {
-		if (!(value &&
+		if (!(
+			value &&
 			name!="this"&&
 			value->getType()->isPointerTy() &&
 			value->getType()->getNonOpaquePointerElementType()->isStructTy() &&
 			codegen.getClasses().is_class(std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str())))) {
 			return;
 		}
+		std::cout << "destruct" << std::endl;
 		codegen.registTask(
 			[&codegen, value]() {
 				codegen.getBuilder().CreateCall(
@@ -1136,8 +1321,23 @@ int main(int args, char* argv[]) {
 						std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str()) + "_destructor"
 					),
 					{ value });
+				return true;
 			}
 		);
+		if (
+			!(
+				codegen.getVariables().getNestCount() != codegen.getVariables().getDepth(name) &&
+				codegen.getLoop()!=codegen.NOT_LOOP
+				//codegen.getBuilder().GetInsertBlock()->getName().str().compare(0, []()constexpr {return std::string_view("loop").size(); }(), "loop") == 0//||
+				))
+		{
+			return;
+		}
+		std::cout << "loop" << std::endl;
+		codegen.registTask([&codegen,depth=codegen.getLoop()]() {
+			
+			return codegen.getVariables().getNestCount() == depth;
+			});
 		});
 	codegen.emplace<NoneNode>(NODE::NONE);
 	codegen.emplace<ExternNode>(NODE::EXTERN);
@@ -1179,3 +1379,13 @@ int main(int args, char* argv[]) {
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
+/*
+idea:関連関数を明記しないで生成する方法
+戻り値推論フェーズでthisを使っていない関数を関連関数とする
+argのfrontを削除する
+
+constructorが生成されるとき、memberのコンストラクタも自動で呼ばなければならない
+デストラクタも同様
+
+todo:メンバーも不要になった瞬間に破棄する
+*/
