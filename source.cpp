@@ -426,6 +426,12 @@ public:
 	const auto& get(decltype(member)::key_type key)const{
 		return member.at(std::move(key));
 	}
+	template <class F>
+	const auto forEachName(F f)const {
+		for (const auto& [name, info] : member) {
+			f(name);
+		}
+	}
 };
 class Classes {
 private:
@@ -437,6 +443,9 @@ public:
 	}
 	const auto &getMember(std::string from, decltype(classes)::key_type className, std::string memberName)const{//一時的な物
 		return classes.at(std::move(className)).get(std::move(memberName));
+	}
+	const auto& getMembers(decltype(classes)::key_type className) {
+		return classes.at(std::move(className));
 	}
 	bool is_class(decltype(classes)::key_type key) {
 		return classes.count(std::move(key));
@@ -776,7 +785,6 @@ public:
 		const auto history = cg.getVariables();
 		cg.getVariables().history(true);
 		if (cg.getLoop() == cg.NOT_LOOP) {
-			std::cout << "if" << std::endl;
 			cg.registTask([&cg, &used] {
 				for (const auto& [depth, name] : cg.getVariables().useHistory()) {
 					used.insert_or_assign(std::to_string(depth) + "_" + name, cg.getVariables().getCounter(depth, name));
@@ -933,6 +941,105 @@ public:
 		return value;
 	}
 };
+class CallNode :public Codegen {
+private:
+public:
+	enum BRANCH {
+		NAME,
+		ARGUMENTS
+	};
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		if (cg.getClasses().is_class(node.branch[NAME].value)) {
+			node.node = NODE::CONSTRUCTOR;
+			return cg.codegen(node);
+		}
+		std::vector<llvm::Value*> args(node.branch[ARGUMENTS].branch.size());
+		for (auto i = 0; auto & arg:args) {
+			arg = cg.codegen(node.branch[ARGUMENTS].branch[i]);
+			++i;
+		}
+		return cg.getBuilder().CreateCall(cg.getModule()->getFunction(node.branch[NAME].value), args);
+	}
+};
+class MemberNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		auto getRawRetType = [&cg](std::string& name) {
+			if (cg.getClasses().is_class(name))return cg.getType()(name);
+			if (cg.getModule()->getFunction(name)->getReturnType()->isPointerTy()) {
+				return cg.getModule()->getFunction(name)->getReturnType()->getNonOpaquePointerElementType();
+			}
+			return cg.getModule()->getFunction(name)->getReturnType();
+		};
+		auto type = [&]() {
+			if (node.branch.front().node == NODE::REFERENCE) {
+				return cg.getVariables().get(node.branch.front().value)->getType()->getNonOpaquePointerElementType();
+			}
+			return getRawRetType(node.branch.front().branch[CallNode::NAME].value);
+		}();
+		auto iter = node.branch.begin();
+		for (auto member = node.branch.begin(); member != node.branch.end(); ++member) {
+			if (member->node != NODE::CALL)continue;
+			if (!cg.getClasses().is_class(member->branch[CallNode::NAME].value) && !cg.getModule()->getFunction(member->branch[CallNode::NAME].value)) {
+				member->branch[CallNode::NAME].value.insert(
+					0,
+					type->getStructName().str() + "_"
+				);
+			}
+			Node self;
+			if (std::distance(iter, member) == 1) {
+				self = *iter;
+			}
+			else {
+				self.node = NODE::MEMBER;
+				self.branch.insert(
+					self.branch.begin(),
+					iter,
+					member
+				);
+			}
+			if (std::distance(iter, member)) {
+				member->branch[CallNode::ARGUMENTS].branch.insert(
+					member->branch[CallNode::ARGUMENTS].branch.begin(),
+					self
+				);
+			}
+			iter = member;
+			type = getRawRetType(member->branch[CallNode::NAME].value);
+		}
+		node.branch.erase(node.branch.begin(), iter);
+		auto value = cg.codegen(node.branch.front());
+		std::for_each(++node.branch.begin(), node.branch.end(),
+			[
+				&
+			](auto& member)mutable {
+				value = cg.getBuilder().CreateStructGEP(
+					value->getType()->getNonOpaquePointerElementType(),
+					value,
+					[&] {
+						const auto name = value->getType()->getNonOpaquePointerElementType()->getStructName().str();
+						if (cg.getStructMember().count(name)) {
+							return cg.getStructMember()[name][member.value];
+						}
+						const auto obj = cg.getClasses().getMember("", name, member.value);
+						const auto parentName = std::move(cg.getBuilder().GetInsertBlock()->getParent()->getName().str());
+						if (
+							obj.getAccess()
+							==
+							ACCESS::PRIVATE &&
+							!std::equal(parentName.begin(), std::next(parentName.begin(), name.size()), name.begin(), name.end())
+							)
+						{
+							throw "private member";
+						}
+						return obj.getOffset();
+					}()
+						);
+			});
+		return value;
+	}
+};
 class FunctionNode :public Codegen {
 private:
 public:
@@ -940,7 +1047,9 @@ public:
 		NAME,
 		ARGUMENTS,
 		TYPE,
-		BLOCK
+		CONSTRUCTOR,
+		BLOCK,
+		//SIZE
 	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		std::vector<llvm::Type*> args(node.branch[ARGUMENTS].branch.size());
@@ -948,6 +1057,21 @@ public:
 			arg = cg.getType()(node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::TYPE].linkBranchStr());
 			++i;
 		}
+		for (auto& member : node.branch[CONSTRUCTOR].branch) {
+			Node reference;
+			reference.node = NODE::MEMBER;
+			reference.branch.resize(2);
+			reference.branch.front().node = NODE::REFERENCE;
+			reference.branch.front().value = "this";
+			reference.branch.back().node = NODE::REFERENCE;
+			reference.branch.back().value = member.branch[CallNode::NAME].value;
+			member.branch[CallNode::ARGUMENTS].branch.insert(member.branch[CallNode::ARGUMENTS].branch.begin(), reference);
+			member.branch[CallNode::NAME].value=cg
+				.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
+				->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), member.branch[CallNode::NAME].value).getOffset())
+				->getStructName().str() + "_init";
+		}
+		node.branch[BLOCK].branch.insert(node.branch[BLOCK].branch.begin(),node.branch[CONSTRUCTOR].branch.begin(), node.branch[CONSTRUCTOR].branch.end());
 		auto createFunction = [&]() {
 			cg.getBuilder().SetInsertPoint(llvm::BasicBlock::Create(cg.getBuilder().getContext(), "entry",
 				llvm::Function::Create(
@@ -979,10 +1103,47 @@ public:
 			cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getRetType() == cg.getBuilder().getVoidTy() ? nullptr : cg.getBuilder().CreateAlloca(cg.getRetType()));
 			cg.codegen(node.branch[BLOCK]);
 			cg.getBuilder().SetInsertPoint(cg.getRetBlock());
-			Node node;
-			node.node = NODE::VARIABLE;
-			node.value = cg.WORK_SPACE;
-			cg.getBuilder().CreateRet(cg.getVariables().get(cg.WORK_SPACE) ? cg.codegen(node):nullptr);
+			Node retVal;
+			retVal.node = NODE::VARIABLE;
+			retVal.value = cg.WORK_SPACE;
+
+			if (
+				node.branch[NAME].value.find_last_of("_")!=std::string::npos&&
+				node.branch[NAME].value.substr(node.branch[NAME].value.find_last_of("_"))=="_drop"
+				//!node.branch[NAME].value.compare(node.branch[NAME].value.size() - destructName.size(), destructName.size(), destructName)
+				&&
+				cg.getClasses().is_class(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
+				)
+			{
+				cg.getClasses().getMembers(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).forEachName([&node, &cg](const auto& name) {
+					if (cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
+						->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->isStructTy()
+						&&
+						cg.getClasses().is_class(cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
+						->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->getStructName().str())
+						)
+					{
+						//Lexer().tokenize("this."+name);
+						Node drop;
+						drop.node = NODE::CALL;//member
+						drop.branch.resize(2);
+						drop.branch[CallNode::NAME].value = cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
+							->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->getStructName().str()+"_drop";
+						drop.branch[CallNode::ARGUMENTS].branch.resize(1);
+						drop.branch[CallNode::ARGUMENTS].branch.front().node=NODE::MEMBER;
+						drop.branch[CallNode::ARGUMENTS].branch.front().branch.resize(2);
+						drop.branch[CallNode::ARGUMENTS].branch.front().branch.front().node=NODE::REFERENCE;
+						drop.branch[CallNode::ARGUMENTS].branch.front().branch.front().value= "this";
+						drop.branch[CallNode::ARGUMENTS].branch.front().branch.back().node=NODE::REFERENCE;
+						drop.branch[CallNode::ARGUMENTS].branch.front().branch.back().value = name;
+						cg.codegen(drop);
+					}
+
+					});
+			}
+
+
+			cg.getBuilder().CreateRet(cg.getVariables().get(cg.WORK_SPACE) ? cg.codegen(retVal):nullptr);
 			cg.getVariables().exitScope();
 			cg.getVariables().exitScope();
 		};
@@ -1003,27 +1164,7 @@ public:
 		return cg.getModule()->getFunction(node.branch[NAME].value);
 	}
 };
-//operator()
-class CallNode :public Codegen {
-private:
-public:
-	enum BRANCH {
-		NAME,
-		ARGUMENTS
-	};
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		if (cg.getClasses().is_class(node.branch[NAME].value)) {
-			node.node = NODE::CONSTRUCTOR;
-			return cg.codegen(node);
-		}
-		std::vector<llvm::Value*> args(node.branch[ARGUMENTS].branch.size());
-		for (auto i = 0; auto & arg:args) {
-			arg = cg.codegen(node.branch[ARGUMENTS].branch[i]);
-			++i;
-		}
-		return cg.getBuilder().CreateCall(cg.getModule()->getFunction(node.branch[NAME].value), args);
-	}
-};
+
 class DefineNode :public Codegen {
 private:
 public:
@@ -1043,94 +1184,13 @@ public:
 		);
 		node.branch[CallNode::ARGUMENTS].branch.front().value = cg.WORK_SPACE;
 		node.branch[CallNode::ARGUMENTS].branch.front().node = NODE::REFERENCE;
-		node.branch[CallNode::NAME].value += "_constructor";
+		node.branch[CallNode::NAME].value += "_init";
 		node.node = NODE::CALL;
 		cg.codegen(node);
 		return cg.getVariables().exitScope().at(cg.WORK_SPACE);
 	}
 };
-class MemberNode :public Codegen {
-private:
-public:
-	enum BRANCH {
-		OBJ,
-	};
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		auto getRawRetType = [&cg](std::string &name) {
-			if (cg.getClasses().is_class(name))return cg.getType()(name);
-			if (cg.getModule()->getFunction(name)->getReturnType()->isPointerTy()) {
-				return cg.getModule()->getFunction(name)->getReturnType()->getNonOpaquePointerElementType();
-			}
-			return cg.getModule()->getFunction(name)->getReturnType();
-		};
-		auto type = [&]() {
-			if (node.branch.front().node == NODE::REFERENCE) {
-				return cg.getVariables().get(node.branch.front().value)->getType()->getNonOpaquePointerElementType();
-			}
-			return getRawRetType(node.branch.front().branch[CallNode::NAME].value);
-		}();
-		auto iter = node.branch.begin();
-		for (auto member = node.branch.begin(); member != node.branch.end(); ++member) {
-			if (member->node != NODE::CALL)continue;
-			if (!cg.getClasses().is_class(member->branch[CallNode::NAME].value)&&!cg.getModule()->getFunction(member->branch[CallNode::NAME].value)) {
-				member->branch[CallNode::NAME].value.insert(
-					0,
-					type->getStructName().str() + "_"
-				);
-			}
-			Node self;
-			if (std::distance(iter, member) == 1) {
-				self = *iter;
-			}
-			else{
-				self.node = NODE::MEMBER;
-				self.branch.insert(
-					self.branch.begin(),
-					iter,
-					member
-				);
-			}
-			if (std::distance(iter, member)) {
-				member->branch[CallNode::ARGUMENTS].branch.insert(
-					member->branch[CallNode::ARGUMENTS].branch.begin(),
-					self
-				);
-			}
-			iter = member;
-			type = getRawRetType(member->branch[CallNode::NAME].value);
-		}
-		node.branch.erase(node.branch.begin(), iter);
-		auto value = cg.codegen(node.branch.front());
-		std::for_each(++node.branch.begin(), node.branch.end(),
-			[
-				&
-			](auto& member)mutable {
-				value = cg.getBuilder().CreateStructGEP(
-					value->getType()->getNonOpaquePointerElementType(),
-					value,
-					[&] {
-						const auto name= value->getType()->getNonOpaquePointerElementType()->getStructName().str();
-						if (cg.getStructMember().count(name)) {
-							return cg.getStructMember()[name][member.value];
-						}
-						const auto obj=cg.getClasses().getMember("", name, member.value);
-						const auto parentName = std::move(cg.getBuilder().GetInsertBlock()->getParent()->getName().str());
-						if (
-							obj.getAccess()
-							==
-							ACCESS::PRIVATE&&
-							!std::equal(parentName.begin(),std::next(parentName.begin(),name.size()),name.begin(),name.end() )
-							)
-						{
-							throw "private member";
-						}
-						return obj.getOffset();
-					}()
-				);
-			});
-		return value;
-	}
-};
+
 
 class MemberLoadNode :public Codegen {
 private:
@@ -1297,7 +1357,7 @@ int main(int args, char* argv[]) {
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
-	auto function = (BNF("fn") + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + block.push()).regist(NODE::FUNCTION);
+	auto function = (BNF("fn") + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push()+BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
 	auto memberRegist = (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).regist(NODE::MEMBER_REGIST);
 	auto structExpr = (BNF("struct") + BNF(TOKEN::IDENT).push() + BNF("{")[(memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::STRUCT);
 	auto accessExpr = ((BNF("private") | BNF("public") | BNF("protected")).push() + BNF(":")).regist(NODE::CLASS_ACCESS);
@@ -1313,12 +1373,11 @@ int main(int args, char* argv[]) {
 			codegen.getClasses().is_class(std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str())))) {
 			return;
 		}
-		std::cout << "destruct" << std::endl;
 		codegen.registTask(
 			[&codegen, value]() {
 				codegen.getBuilder().CreateCall(
 					codegen.getModule()->getFunction(
-						std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str()) + "_destructor"
+						std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str()) + "_drop"
 					),
 					{ value });
 				return true;
@@ -1333,7 +1392,6 @@ int main(int args, char* argv[]) {
 		{
 			return;
 		}
-		std::cout << "loop" << std::endl;
 		codegen.registTask([&codegen,depth=codegen.getLoop()]() {
 			
 			return codegen.getVariables().getNestCount() == depth;
@@ -1380,12 +1438,9 @@ int main(int args, char* argv[]) {
 	return EXIT_SUCCESS;
 }
 /*
-idea:関連関数を明記しないで生成する方法
-戻り値推論フェーズでthisを使っていない関数を関連関数とする
-argのfrontを削除する
 
-constructorが生成されるとき、memberのコンストラクタも自動で呼ばなければならない
-デストラクタも同様
+init()->double:a(),b()
+a_init(this.a,arguments);
+drop(){
 
-todo:メンバーも不要になった瞬間に破棄する
 */
