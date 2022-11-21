@@ -59,7 +59,7 @@ public:
 			};
 			if (
 				check(TOKEN::NUMBER, R"(^\d+)") ||
-				check(TOKEN::RESERVED, R"(^[&\[\];:,\.\(\)+*/=\-<>{}])") ||
+				check(TOKEN::RESERVED, R"(^[!&%\[\];:,\.\(\)+*/=\-<>{}])") ||
 				check(TOKEN::IDENT, R"(^[a-zA-Z_][\w]*)") ||
 				check(TOKEN::STRING, "^\".*?[^\\\\]\"")
 				) {
@@ -87,10 +87,16 @@ enum class NODE {
 	IF,
 	WHILE,
 	LESS,
+	LESS_EQUAL,
+	MORE,
+	MORE_EQUAL,
+	EQUAL,
+	NOT_EQUAL,
 	LET,
 	SUB,
 	MUL,
 	DIV,
+	REM,
 	INT,
 	FLOATING_POINT,
 	ARRAY,
@@ -528,7 +534,7 @@ public:
 	}
 	llvm::Value* codegen(Node node) {
 		tryTask();
-		return generators[node.node]->codegen(*this, node);
+		return generators[node.node]->codegen(*this, node);//vec[node.cast]
 	}
 };
 class NoneNode :public Codegen {
@@ -545,44 +551,140 @@ public:
 		NAME
 	};
 };
+//enum class TypeIdent...
 class AddNode :public Codegen {
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateFAdd(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]), "addtmp");
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFAdd(value,cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateAdd(value, cg.codegen(node.branch.back()));
+		//const auto values = makeArray(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]));
+		//if(std::ranges::any_of(values, [](const auto& value) {
+		//	return value->getType()->isFloatingPointTy();
+		//	}))return cg.getBuilder().CreateFAdd(values.front(), values.back());
+		//return cg.getBuilder().CreateAdd(values.front(),values.back());//std::apply
+		//createbinop instructions[anyof],value,right
+		//return cg.getBuilder().CreateFAdd(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]), "addtmp");
 	}
 };
 class SubNode :public Codegen {
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateFSub(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]), "subtmp");
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFSub(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateSub(value, cg.codegen(node.branch.back()));
+
 	}
 };
 class MulNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateMul(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]), "multmp");
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFMul(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateMul(value, cg.codegen(node.branch.back()));
+
 	}
 };
 class DivNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateFDiv(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]), "divtmp");
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFDiv(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateSDiv(value, cg.codegen(node.branch.back()));
+
+	}
+};
+class RemNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFRem(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateSRem(value, cg.codegen(node.branch.back()));//urem unsigned srem
+
 	}
 };
 class LessNode :public Codegen {
 private:
 public:
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateUIToFP(
-			cg.getBuilder().CreateFCmpULT(
-				cg.codegen(node.branch[0]),
-				cg.codegen(node.branch[1]),
-				"compareTemp"),
-			cg.getBuilder().getDoubleTy(), "boolTemp");
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {//compareNode -> operator"<"inst
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFCmpULT(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateICmpULT(value, cg.codegen(node.branch.back()));
 	}
 };
+class LessEqualNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFCmpULE(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateICmpULE(value, cg.codegen(node.branch.back()));
+	}
+};
+class MoreNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFCmpUGT(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateICmpUGT(value, cg.codegen(node.branch.back()));
+	}
+};
+class MoreEqualNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFCmpUGE(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateICmpUGE(value, cg.codegen(node.branch.back()));
+	}
+};
+class EqualNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFCmpOEQ(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateICmpEQ(value, cg.codegen(node.branch.back()));
+	}
+};
+class NotEqualNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto value = cg.codegen(node.branch.front());
+		if (value->getType()->isFloatingPointTy()) {
+			return cg.getBuilder().CreateFCmpONE(value, cg.codegen(node.branch.back()));
+		}
+		return cg.getBuilder().CreateICmpNE(value, cg.codegen(node.branch.back()));
+	}
+};
+
+
+
 class StringNode :public Codegen {
 private:
 public:
@@ -800,7 +902,8 @@ public:
 		cg.getVariables().history(false);
 		if (cg.getLoop()!=cg.NOT_LOOP || !history.findDeleted(cg.getVariables()).size()) {
 			cg.getBuilder().restoreIP(save);
-			const auto comp = cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifComp");
+			auto comp = cg.codegen(node.branch[0].branch[0]);
+			if (comp->getType()->isFloatingPointTy())comp = cg.getBuilder().CreateFCmpONE(comp,llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)));
 			cg.tryTask();
 			cg.getBuilder().CreateCondBr(
 				comp,
@@ -815,8 +918,10 @@ public:
 		ifBlock = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "if", after->getParent()),
 			elseBlock = llvm::BasicBlock::Create(cg.getBuilder().getContext(), "else", after->getParent());
 		cg.getBuilder().restoreIP(save);
+		auto comp = cg.codegen(node.branch[0].branch[0]);
+		if (comp->getType()->isFloatingPointTy())comp = cg.getBuilder().CreateFCmpONE(comp, llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)));
 		cg.getBuilder().CreateCondBr(
-			cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifcond"),
+			comp,
 			ifBlock,
 			elseBlock
 		);
@@ -886,8 +991,10 @@ public:
 		cg.getBuilder().CreateBr(loop);
 		cg.getBuilder().SetInsertPoint(loop);
 		cg.getVariables().nest();
+		auto comp = cg.codegen(node.branch[0].branch[0]);
+		if (comp->getType()->isFloatingPointTy())comp = cg.getBuilder().CreateFCmpONE(comp, llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)));
 		cg.getBuilder().CreateCondBr(
-			cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "loopCond"),
+			comp,
 			then,
 			after
 		);
@@ -1339,15 +1446,30 @@ int main(int args, char* argv[]) {
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
 	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") [((variable.push() +BNF(":") + (*expr).push()).push()[BNF(",")]).loop()].push() + BNF("}")).regist(NODE::STRUCT_INIT);
 	BNF  add;
-	auto compare = ((*add).push() + BNF("<") + (*add).push()).regist(NODE::LESS) | (*add);
+	auto compare = (*add).push() + 
+		(
+			(BNF("<")+BNF("=") + (*add).push()).regist(NODE::LESS_EQUAL) |
+			(BNF("<") + (*add).push()).regist(NODE::LESS)|
+			(BNF(">") + BNF("=") + (*add).push()).regist(NODE::MORE_EQUAL) |
+			(BNF(">") + (*add).push()).regist(NODE::MORE)|
+			(BNF("=") + BNF("=") + (*add).push()).regist(NODE::EQUAL) |
+			(BNF("!")+BNF("=") + (*add).push()).regist(NODE::NOT_EQUAL) 
+		)
+		| (*add);
+	
 	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + ((*expr).push().regist(NODE::SCALAR)).push()).regist(NODE::LET);
 	auto assign = ((arrayAccess | member | variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
 	auto primary = BNF("(") + (*compare).expect(BNF(")")) | intNum | floatNum | structInit | arrayExpr | arrayAccess.push().regist(NODE::ARRAY_ACCESS_LOAD) | member.push().regist(NODE::MEMBER_LOAD) | call | reference | variable | string;
-	auto mul = (primary.push() + (BNF("*") + (*primary).push()).regist(NODE::MUL) | BNF("/") + (*primary).push().regist(NODE::DIV)) | primary;
-	add = (mul.push() + (BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB)) | mul;
+	auto mul = (primary.push() + 
+		(
+			(BNF("*") + (*primary).push()).regist(NODE::MUL) |
+			(BNF("/") + (*primary).push().regist(NODE::DIV))|
+			(BNF("%") + (*primary).push().regist(NODE::REM))
+			)
+		) | primary;
+	add = (mul.push() + ((BNF("+") + (*add).push()).regist(NODE::ADD) | BNF("-") + (*add).push().regist(NODE::SUB))) | mul;
 	auto ret = (BNF("return")[(*expr).push()]).regist(NODE::RETURN);
 	auto block = (BNF("{")[(((*expr).push() + BNF(";")) | BNF(";")).loop()] + BNF("}")).regist(NODE::BLOCK);
-	//auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()[((BNF("elif") | BNF("else") + BNF("if"))[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
 	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()+((BNF("else") + (*expr).push())|BNF().push())).regist(NODE::IF);
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
@@ -1415,10 +1537,16 @@ int main(int args, char* argv[]) {
 	codegen.emplace<DefineNode>(NODE::DEFINE);
 	codegen.emplace<AssignNode>(NODE::ASSIGN);
 	codegen.emplace<LessNode>(NODE::LESS);
+	codegen.emplace<LessEqualNode>(NODE::LESS_EQUAL);
+	codegen.emplace<MoreNode>(NODE::MORE);
+	codegen.emplace<MoreEqualNode>(NODE::MORE_EQUAL);
+	codegen.emplace<EqualNode>(NODE::EQUAL);
+	codegen.emplace<NotEqualNode>(NODE::NOT_EQUAL);
 	codegen.emplace<AddNode>(NODE::ADD);
 	codegen.emplace<SubNode>(NODE::SUB);
 	codegen.emplace<MulNode>(NODE::MUL);
 	codegen.emplace<DivNode>(NODE::DIV);
+	codegen.emplace<RemNode>(NODE::REM);
 	codegen.emplace<IfNode>(NODE::IF);
 	codegen.emplace<WhileNode>(NODE::WHILE);
 	codegen.emplace<ArrayAccessLoadNode>(NODE::ARRAY_ACCESS_LOAD);
