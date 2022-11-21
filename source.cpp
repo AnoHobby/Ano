@@ -656,10 +656,7 @@ class ReferenceNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {//get->not found module->getfunction
-		//if (!cg.getModule()->getFunction(node.value)) {
-			return cg.getVariables().get(node.value);
-		//}
-		//return cg.getModule()->getFunction(node.value);
+		return cg.getVariables().get(node.value);
 	}
 };
 class StructInitNode :public Codegen {
@@ -803,8 +800,10 @@ public:
 		cg.getVariables().history(false);
 		if (cg.getLoop()!=cg.NOT_LOOP || !history.findDeleted(cg.getVariables()).size()) {
 			cg.getBuilder().restoreIP(save);
+			const auto comp = cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifComp");
+			cg.tryTask();
 			cg.getBuilder().CreateCondBr(
-				cg.getBuilder().CreateFCmpONE(cg.codegen(node.branch[0].branch[0]), llvm::ConstantFP::get(cg.getBuilder().getContext(), llvm::APFloat(0.0)), "ifcond"),
+				comp,
 				ifBlock,
 				elseBlock
 			);
@@ -1079,8 +1078,6 @@ public:
 						llvm::ArrayRef(args), false),
 					llvm::Function::ExternalLinkage, node.branch[NAME].value, *cg.getModule())
 			));
-
-			//cg.getVariables().insert_or_assign(node.branch[NAME].value,cg.getBuilder().GetInsertBlock()->getParent());
 			cg.getVariables().nest();
 			for (auto i = 0; auto & arg : cg.getModule()->getFunction(node.branch[NAME].value)->args()) {
 				if (arg.getType()->isPointerTy()) {
@@ -1110,7 +1107,6 @@ public:
 			if (
 				node.branch[NAME].value.find_last_of("_")!=std::string::npos&&
 				node.branch[NAME].value.substr(node.branch[NAME].value.find_last_of("_"))=="_drop"
-				//!node.branch[NAME].value.compare(node.branch[NAME].value.size() - destructName.size(), destructName.size(), destructName)
 				&&
 				cg.getClasses().is_class(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
 				)
@@ -1123,9 +1119,8 @@ public:
 						->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->getStructName().str())
 						)
 					{
-						//Lexer().tokenize("this."+name);
 						Node drop;
-						drop.node = NODE::CALL;//member
+						drop.node = NODE::CALL;
 						drop.branch.resize(2);
 						drop.branch[CallNode::NAME].value = cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
 							->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->getStructName().str()+"_drop";
@@ -1353,7 +1348,7 @@ int main(int args, char* argv[]) {
 	auto ret = (BNF("return")[(*expr).push()]).regist(NODE::RETURN);
 	auto block = (BNF("{")[(((*expr).push() + BNF(";")) | BNF(";")).loop()] + BNF("}")).regist(NODE::BLOCK);
 	//auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()[((BNF("elif") | BNF("else") + BNF("if"))[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).push().loop()][BNF("else") + block.push()]).regist(NODE::IF);
-	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()[BNF("else") + block.push()]).regist(NODE::IF);
+	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()+((BNF("else") + (*expr).push())|BNF().push())).regist(NODE::IF);
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
@@ -1387,7 +1382,6 @@ int main(int args, char* argv[]) {
 			!(
 				codegen.getVariables().getNestCount() != codegen.getVariables().getDepth(name) &&
 				codegen.getLoop()!=codegen.NOT_LOOP
-				//codegen.getBuilder().GetInsertBlock()->getName().str().compare(0, []()constexpr {return std::string_view("loop").size(); }(), "loop") == 0//||
 				))
 		{
 			return;
@@ -1397,6 +1391,7 @@ int main(int args, char* argv[]) {
 			return codegen.getVariables().getNestCount() == depth;
 			});
 		});
+	codegen.emplace<NoneNode>(NODE::SOME);
 	codegen.emplace<NoneNode>(NODE::NONE);
 	codegen.emplace<ExternNode>(NODE::EXTERN);
 	codegen.emplace<FunctionNode>(NODE::FUNCTION);
@@ -1437,10 +1432,3 @@ int main(int args, char* argv[]) {
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
-/*
-
-init()->double:a(),b()
-a_init(this.a,arguments);
-drop(){
-
-*/
