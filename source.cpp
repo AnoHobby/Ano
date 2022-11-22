@@ -104,8 +104,6 @@ enum class NODE {
 	ARRAY_ACCESS_LOAD,
 	SCALAR,
 	REFERENCE,
-	STRUCT,
-	STRUCT_INIT,
 	MEMBER,
 	MEMBER_LOAD,
 	STRING,
@@ -113,7 +111,9 @@ enum class NODE {
 	MEMBER_REGIST,
 	CLASS_ACCESS,
 	CONSTRUCTOR,
-	DEFINE
+	DEFINE,
+	MODULE,
+	MODULE_ACCESS,
 };
 class Node {
 private:
@@ -367,6 +367,12 @@ public:
 		}
 		return DEPTH_NOT_FOUND;//variables.size()->not found
 	}
+	auto find(const decltype(variables)::value_type::key_type name)const{
+		for (const auto& variable : variables) {
+			if(variable.count(name))return true;
+		}
+		return false;
+	}
 	auto useHistory() {
 		return std::move(histories);
 	}
@@ -412,8 +418,12 @@ enum class ACCESS {
 class MemberInfo {
 private:
 	const ACCESS access;
-	const unsigned offset;
+	const int offset;
 public:
+	enum OFFSET{
+		ASSOCIATE=-2,
+		FUNCTION
+	};
 	MemberInfo(decltype(access) access, decltype(offset) offset) :access(access), offset(offset) {}
 	const auto& getOffset() const {
 		return offset;
@@ -421,20 +431,45 @@ public:
 	const auto& getAccess()const{
 		return access;
 	}
+	const auto is_variable()const{
+		return 0 <= offset;
+	}
 };
-class Member {
+class ClassInfo {
 private:
+	const std::string moduleName,className;
 	std::unordered_map<std::string, MemberInfo > member;//member->access,offset
 public:
+	ClassInfo(decltype(moduleName) moduleName,decltype(className) className):moduleName(std::move(moduleName)),className(className) {
+
+	}
 	auto emplace(decltype(member)::key_type key, ACCESS access) {
 		member.emplace(std::piecewise_construct, std::forward_as_tuple(std::move(key)), std::forward_as_tuple(access, member.size()));
+	}
+	auto emplace(decltype(member)::key_type key, ACCESS access,MemberInfo::OFFSET offset) {
+		member.emplace(std::piecewise_construct, std::forward_as_tuple(std::move(key)), std::forward_as_tuple(access, offset));
 	}
 	const auto& get(decltype(member)::key_type key)const{
 		return member.at(std::move(key));
 	}
+	const auto is_accessible(std::string moduleName,std::string from, decltype(member)::key_type key)const{//from->ClassInfo
+		switch (member.at(key).getAccess()) {
+		case ACCESS::PUBLIC:
+			return true;
+			break;
+		case ACCESS::PRIVATE:
+			return from == className;
+			break;
+		case ACCESS::PROTECTED:
+			if (moduleName.size() < this->moduleName.size())return false;
+			return !moduleName.compare(0,this->moduleName.size(),this->moduleName);
+			break;
+		}
+	}
 	template <class F>
-	const auto forEachName(F f)const {
+	const auto forEachMemberName(F f)const {
 		for (const auto& [name, info] : member) {
+			if (!info.is_variable())continue;
 			f(name);
 		}
 	}
@@ -442,19 +477,55 @@ public:
 class Classes {
 private:
 
-	std::unordered_map<std::string, Member> classes;
+	std::unordered_map<std::string, ClassInfo> classes;
 public:
-	auto emplace(decltype(classes)::key_type className,std::string memberName,ACCESS access) {
-		classes[std::move(className)].emplace(std::move(memberName), access);
+	auto addClass(std::string moduleName,std::string className) {
+		classes.emplace(std::piecewise_construct,std::forward_as_tuple(className), std::forward_as_tuple(moduleName,className));
 	}
-	const auto &getMember(std::string from, decltype(classes)::key_type className, std::string memberName)const{//ˆêŽž“I‚È•¨
-		return classes.at(std::move(className)).get(std::move(memberName));
+	template <class... T>
+	auto emplace(decltype(classes)::key_type className,std::string memberName,T... options) {
+		classes.at(std::move(className)).emplace(std::move(memberName), options...);
 	}
-	const auto& getMembers(decltype(classes)::key_type className) {
+	const auto& getClass(decltype(classes)::key_type className) {
 		return classes.at(std::move(className));
 	}
-	bool is_class(decltype(classes)::key_type key) {
+	bool is_class(const decltype(classes)::key_type key) const{
 		return classes.count(std::move(key));
+	}
+};
+class Namespace {
+private:
+	std::string name;
+	std::unordered_map<std::string,Namespace> children;
+	std::vector<std::reference_wrapper<Namespace> > access;
+	//std::unordered_map<std::string, ACCESS> accessibility;
+public:
+	Namespace(decltype(name) name):name(name) {
+		access.push_back(std::ref(*this));
+	}
+	auto add(std::string nest) {
+		access.back().get().children.emplace(nest, nest);
+	}
+	bool exists(std::string name) {
+		return access.back().get().children.count(name);
+	}
+	auto nest(std::string name) {
+		access.push_back(std::ref(access.back().get().children.at(name)));
+	}
+	auto getNestCount() {
+		return access.size();
+	}
+	auto parent() {
+		access.pop_back();
+	}
+	auto to_string() {
+		std::string str;
+		for (const auto& history : access) {
+			if (history.get().name.empty())continue;
+			str += history.get().name;
+			str.push_back('.');
+		}
+		return std::move(str);
 	}
 };
 class CodeGenerator;
@@ -477,14 +548,15 @@ private:
 	Variables variables;
 	Classes classes;
 	std::stack<std::function<bool()>> tasks;
-	std::unordered_map<std::string, std::unordered_map<std::string, unsigned> > structMember;
 	int loop=NOT_LOOP;
+	Namespace moduleNamespace;
 public:
 	static constexpr auto WORK_SPACE = "0";
 	CodeGenerator() :
 		mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
 		builder(context),
-		typeAnalyzer(builder)
+		typeAnalyzer(builder),
+		moduleNamespace("")//"module"->module.selfMadeModule
 	{
 		context.setOpaquePointers(false);
 	}
@@ -494,9 +566,6 @@ public:
 	}
 	auto& getLoop() {
 		return loop;
-	}
-	auto& getStructMember() {
-		return structMember;
 	}
 	auto& getVariables() {
 		return variables;
@@ -515,6 +584,9 @@ public:
 	}
 	auto& getClasses() {
 		return classes;
+	}
+	auto& getModuleNamespace() {
+		return moduleNamespace;
 	}
 	template <class T, class... ArgT>
 	auto emplace(decltype(generators)::key_type key, ArgT... args) {
@@ -551,7 +623,6 @@ public:
 		NAME
 	};
 };
-//enum class TypeIdent...
 class AddNode :public Codegen {
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
@@ -560,13 +631,6 @@ public:
 			return cg.getBuilder().CreateFAdd(value,cg.codegen(node.branch.back()));
 		}
 		return cg.getBuilder().CreateAdd(value, cg.codegen(node.branch.back()));
-		//const auto values = makeArray(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]));
-		//if(std::ranges::any_of(values, [](const auto& value) {
-		//	return value->getType()->isFloatingPointTy();
-		//	}))return cg.getBuilder().CreateFAdd(values.front(), values.back());
-		//return cg.getBuilder().CreateAdd(values.front(),values.back());//std::apply
-		//createbinop instructions[anyof],value,right
-		//return cg.getBuilder().CreateFAdd(cg.codegen(node.branch[0]), cg.codegen(node.branch[1]), "addtmp");
 	}
 };
 class SubNode :public Codegen {
@@ -713,7 +777,23 @@ public:
 		);
 	}
 };
-
+class ModuleNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		cg.getModuleNamespace().add(node.branch.front().value);
+		cg.getModuleNamespace().nest(node.branch.front().value);
+		//cg.getEditModule()+=node.branch.front().value+=".";
+		for (auto& object : node.branch.back().branch) {
+			if (object.node == NODE::MODULE)continue;
+			object.branch.front().value.insert(0,cg.getModuleNamespace().to_string());
+		}
+		cg.codegen(node.branch.back());
+		//cg.getEditModule().erase(cg.getEditModule().size()-node.branch.front().value.size());
+		cg.getModuleNamespace().parent();
+		return nullptr;
+	}
+};
 class ArrayAccessLoadNode :public Codegen {
 private:
 public:
@@ -759,24 +839,6 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {//get->not found module->getfunction
 		return cg.getVariables().get(node.value);
-	}
-};
-class StructInitNode :public Codegen {
-private:
-public:
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		auto* structValue = cg.getBuilder().CreateAlloca(cg.getType()(node.branch[0].value));
-		for (auto& value : node.branch[1].branch) {
-			cg.getBuilder().CreateStore(
-				cg.codegen(value.branch[1]),
-				cg.getBuilder().CreateStructGEP(
-					structValue->getAllocatedType(),
-					structValue,
-					cg.getStructMember()[structValue->getAllocatedType()->getStructName().str()][value.branch[0].value]
-				)
-			);
-		}
-		return structValue;
 	}
 };
 class ArrayNode :public Codegen {
@@ -867,7 +929,7 @@ public:
 		llvm::Value* result;
 		for (const auto& child : node.branch) {
 			result = cg.codegen(child);
-		}//trytask
+		}
 		cg.getVariables().exitScope();
 		return result;
 	}
@@ -1055,9 +1117,26 @@ public:
 		ARGUMENTS
 	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		const auto is_class = [&cg](auto&& name) {
+			return name.find("_") != std::string::npos &&
+				cg.getClasses().is_class(name.substr(0, name.find("_")));
+		};
 		if (cg.getClasses().is_class(node.branch[NAME].value)) {
 			node.node = NODE::CONSTRUCTOR;
 			return cg.codegen(node);
+		}
+		else if (
+			is_class(node.branch[NAME].value)&&
+			!cg.getClasses().getClass(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).is_accessible(
+				cg.getModuleNamespace().to_string(),
+				[&]()->std::string {
+					if (is_class(cg.getBuilder().GetInsertBlock()->getParent()->getName().str()))return node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"));
+					return "";
+				}(),
+					node.branch[NAME].value.substr(node.branch[NAME].value.find("_")+1)
+			)
+			) {
+			std::cout << "access error";
 		}
 		std::vector<llvm::Value*> args(node.branch[ARGUMENTS].branch.size());
 		for (auto i = 0; auto & arg:args) {
@@ -1065,6 +1144,30 @@ public:
 			++i;
 		}
 		return cg.getBuilder().CreateCall(cg.getModule()->getFunction(node.branch[NAME].value), args);
+	}
+};
+class NamespaceNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		node.node = NODE::MEMBER;
+		if (node.branch.front().node != NODE::REFERENCE || cg.getVariables().find(node.branch.front().value)/* || !cg.getModuleNamespace().exists(node.branch.front().value)*/) {
+			return cg.codegen(node);
+		}
+		const auto nestCount = cg.getModuleNamespace().getNestCount();
+		for (const auto &nest:node.branch) {
+			if (nest.node!=NODE::REFERENCE||!cg.getModuleNamespace().exists(nest.value))break;
+			cg.getModuleNamespace().nest(nest.value);
+			node.branch.erase(node.branch.begin());
+		}
+		node.branch.front().branch[CallNode::NAME].value.insert(
+			0,
+			cg.getModuleNamespace().to_string()
+		);
+		for (auto i = cg.getModuleNamespace().getNestCount() - nestCount; i > 0; --i) {
+			cg.getModuleNamespace().parent();
+		}
+		return cg.codegen(node);
 	}
 };
 class MemberNode :public Codegen {
@@ -1123,23 +1226,16 @@ public:
 				value = cg.getBuilder().CreateStructGEP(
 					value->getType()->getNonOpaquePointerElementType(),
 					value,
-					[&] {
+					[&] () {
 						const auto name = value->getType()->getNonOpaquePointerElementType()->getStructName().str();
-						if (cg.getStructMember().count(name)) {
-							return cg.getStructMember()[name][member.value];
+						auto from=std::move(cg.getBuilder().GetInsertBlock()->getParent()->getName().str());
+						if (from.find("_") == std::string::npos)from.clear();
+						else {
+							from.erase(from.find("_"));
 						}
-						const auto obj = cg.getClasses().getMember("", name, member.value);
-						const auto parentName = std::move(cg.getBuilder().GetInsertBlock()->getParent()->getName().str());
-						if (
-							obj.getAccess()
-							==
-							ACCESS::PRIVATE &&
-							!std::equal(parentName.begin(), std::next(parentName.begin(), name.size()), name.begin(), name.end())
-							)
-						{
-							throw "private member";
-						}
-						return obj.getOffset();
+						if (!cg.getClasses().getClass(name).is_accessible(cg.getModuleNamespace().to_string(), from, member.value))
+							std::cout << "access error!";//todo:cg.error(message);
+						return cg.getClasses().getClass(name).get(member.value).getOffset();
 					}()
 						);
 			});
@@ -1150,6 +1246,7 @@ class FunctionNode :public Codegen {
 private:
 public:
 	enum BRANCH {
+		ACCESSIBILITY,
 		NAME,
 		ARGUMENTS,
 		TYPE,
@@ -1174,7 +1271,7 @@ public:
 			member.branch[CallNode::ARGUMENTS].branch.insert(member.branch[CallNode::ARGUMENTS].branch.begin(), reference);
 			member.branch[CallNode::NAME].value=cg
 				.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
-				->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), member.branch[CallNode::NAME].value).getOffset())
+				->getStructElementType(cg.getClasses().getClass(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).get(member.branch[CallNode::NAME].value).getOffset())
 				->getStructName().str() + "_init";
 		}
 		node.branch[BLOCK].branch.insert(node.branch[BLOCK].branch.begin(),node.branch[CONSTRUCTOR].branch.begin(), node.branch[CONSTRUCTOR].branch.end());
@@ -1218,19 +1315,16 @@ public:
 				cg.getClasses().is_class(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
 				)
 			{
-				cg.getClasses().getMembers(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).forEachName([&node, &cg](const auto& name) {
+				cg.getClasses().getClass(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).forEachMemberName([&node, &cg](const auto& name) {
 					if (cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
-						->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->isStructTy()
-						&&
-						cg.getClasses().is_class(cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
-						->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->getStructName().str())
+						->getStructElementType(cg.getClasses().getClass(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).get(name).getOffset())->isStructTy()
 						)
 					{
 						Node drop;
 						drop.node = NODE::CALL;
 						drop.branch.resize(2);
 						drop.branch[CallNode::NAME].value = cg.getType()(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")))
-							->getStructElementType(cg.getClasses().getMember("", node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_")), name).getOffset())->getStructName().str()+"_drop";
+							->getStructElementType(cg.getClasses().getClass(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).get(name).getOffset())->getStructName().str() + "_drop";
 						drop.branch[CallNode::ARGUMENTS].branch.resize(1);
 						drop.branch[CallNode::ARGUMENTS].branch.front().node=NODE::MEMBER;
 						drop.branch[CallNode::ARGUMENTS].branch.front().branch.resize(2);
@@ -1317,20 +1411,22 @@ public:
 		auto* structType = llvm::StructType::create(cg.getBuilder().getContext(), node.branch[NAME].value);
 		std::vector <llvm::Type* > types;
 		cg.getType().emplace(structType->getName().str(), structType);
+		cg.getClasses().addClass(cg.getModuleNamespace().to_string(),node.branch[NAME].value);
 		for (ACCESS access; auto & member : node.branch[MEMBERS].branch) {
 			if (member.node == NODE::CLASS_ACCESS) {
-				access=std::unordered_map<decltype(member.value), ACCESS>{
+				access = std::unordered_map<decltype(member.value), ACCESS>{
 					{"public", ACCESS::PUBLIC},
 					{ "private",ACCESS::PRIVATE },
 					{ "protected",ACCESS::PROTECTED },
 				}.at(member.branch.front().value);
 				continue;
 			}
-			if (member.node != NODE::MEMBER_REGIST) {
+			if (member.node == NODE::FUNCTION) {
+				cg.getClasses().emplace(node.branch[NAME].value, member.branch[FunctionNode::NAME].value, access, MemberInfo::OFFSET::FUNCTION);
 				continue;
 			}
 			types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
-			cg.getClasses().emplace(node.branch[NAME].value, member.branch[TypeIdentNode::NAME].value,access);
+			cg.getClasses().emplace(node.branch[NAME].value, member.branch[TypeIdentNode::NAME].value, access);
 		}
 		structType->setBody(types, false);
 		for (auto& member : node.branch[MEMBERS].branch) {
@@ -1350,46 +1446,6 @@ public:
 			);
 			cg.codegen(member);
 		}
-	}
-};
-class StructNode :public Codegen {
-private:
-public:
-	enum BRANCH {
-		NAME,
-		MEMBERS
-	};
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		auto* structType = llvm::StructType::create(cg.getBuilder().getContext(), node.branch[NAME].value);
-		cg.getType().emplace(structType->getName().str(), structType);
-		std::vector <llvm::Type* > types;
-		cg.getStructMember().emplace(structType->getName().str(), std::unordered_map<std::string, unsigned>{});
-		for (unsigned hash = 0; auto & member : node.branch[MEMBERS].branch) {
-			if (member.node != NODE::FUNCTION) {
-				types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
-				cg.getStructMember()[structType->getName().str()].emplace(member.branch[TypeIdentNode::NAME].value, hash);
-				++hash;
-			}
-		}
-		structType->setBody(types, false);
-		for (auto& member : node.branch[MEMBERS].branch) {
-			if (member.node != NODE::FUNCTION)continue;
-			member.branch[FunctionNode::NAME].value.insert(
-				0,
-				structType->getName().str() + "_"
-			);
-			Node self;
-			self.branch.resize(2/*TypeIdentNode branch max size*/);
-			self.branch.front().branch.resize(1);
-			self.branch.front().branch.front().value = structType->getName().str() + "*";
-			self.branch[TypeIdentNode::NAME].value = "this";
-			member.branch[FunctionNode::ARGUMENTS].branch.emplace(//push_back is ok
-				member.branch[FunctionNode::ARGUMENTS].branch.begin(),
-				self
-			);
-			cg.codegen(member);
-		}
-		
 	}
 };
 class ExternNode :public Codegen {
@@ -1442,9 +1498,8 @@ int main(int args, char* argv[]) {
 	BNF expr;
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
 	auto arrayAccess = (variable.regist(NODE::REFERENCE).push() + (BNF("[") + (*expr).push() + BNF("]")).loop().push()).regist(NODE::ARRAY_ACCESS);
-	auto member = ((call | variable.regist(NODE::REFERENCE)).push() + ((BNF(".") + (call | variable.regist(NODE::REFERENCE))).push().loop())).regist(NODE::MEMBER);
+	auto member = ((call | variable.regist(NODE::REFERENCE)).push() + ((BNF(".") + (call | variable.regist(NODE::REFERENCE))).push().loop())).regist(NODE::MODULE_ACCESS);
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
-	auto structInit = (BNF(TOKEN::IDENT).push() + BNF("{") [((variable.push() +BNF(":") + (*expr).push()).push()[BNF(",")]).loop()].push() + BNF("}")).regist(NODE::STRUCT_INIT);
 	BNF  add;
 	auto compare = (*add).push() + 
 		(
@@ -1459,7 +1514,7 @@ int main(int args, char* argv[]) {
 	
 	auto let = (BNF("let") + BNF(TOKEN::IDENT).push() + BNF("=") + ((*expr).push().regist(NODE::SCALAR)).push()).regist(NODE::LET);
 	auto assign = ((arrayAccess | member | variable.regist(NODE::REFERENCE)).push() + BNF("=") + (*expr).push()).regist(NODE::ASSIGN);
-	auto primary = BNF("(") + (*compare).expect(BNF(")")) | intNum | floatNum | structInit | arrayExpr | arrayAccess.push().regist(NODE::ARRAY_ACCESS_LOAD) | member.push().regist(NODE::MEMBER_LOAD) | call | reference | variable | string;
+	auto primary = BNF("(") + (*compare).expect(BNF(")")) | intNum | floatNum  | arrayExpr | arrayAccess.push().regist(NODE::ARRAY_ACCESS_LOAD) | member.push().regist(NODE::MEMBER_LOAD) | call | reference | variable | string;
 	auto mul = (primary.push() + 
 		(
 			(BNF("*") + (*primary).push()).regist(NODE::MUL) |
@@ -1474,20 +1529,22 @@ int main(int args, char* argv[]) {
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
-	auto function = (BNF("fn") + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push()+BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
+	auto function = ((BNF("fn")|BNF("pvt")|BNF("pub")).push() + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
 	auto memberRegist = (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).regist(NODE::MEMBER_REGIST);
-	auto structExpr = (BNF("struct") + BNF(TOKEN::IDENT).push() + BNF("{")[(memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::STRUCT);
 	auto accessExpr = ((BNF("private") | BNF("public") | BNF("protected")).push() + BNF(":")).regist(NODE::CLASS_ACCESS);
 	auto classExpr = (BNF("class") + BNF(TOKEN::IDENT).push() + BNF("{")[accessExpr.push() + (accessExpr | memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::CLASS);
-	auto program = (classExpr|structExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
+	BNF moduleExpr = ((BNF("mod")|BNF("module")) + BNF(TOKEN::IDENT).push() + BNF("{") + ((*moduleExpr) | classExpr | function).push().loop().regist(NODE::BLOCK).push() + BNF("}")).regist(NODE::MODULE);
+	auto program = (moduleExpr|classExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
 	CodeGenerator codegen;
 	codegen.setDestructorCallback([&codegen,&call](std::string name,llvm::Value* value) {
-		if (!(
+		if (!
+			(
 			value &&
 			name!="this"&&
 			value->getType()->isPointerTy() &&
-			value->getType()->getNonOpaquePointerElementType()->isStructTy() &&
-			codegen.getClasses().is_class(std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str())))) {
+			value->getType()->getNonOpaquePointerElementType()->isStructTy()
+			)
+			) {
 			return;
 		}
 		codegen.registTask(
@@ -1523,11 +1580,11 @@ int main(int args, char* argv[]) {
 	codegen.emplace<StringNode>(NODE::STRING);
 	codegen.emplace<DoubleNode>(NODE::FLOATING_POINT);
 	codegen.emplace<IntNode>(NODE::INT);
+	codegen.emplace<ModuleNode>(NODE::MODULE);
 	codegen.emplace<ClassNode>(NODE::CLASS);
 	codegen.emplace<ConstructorNode>(NODE::CONSTRUCTOR);
-	codegen.emplace<StructNode>(NODE::STRUCT);
-	codegen.emplace<StructInitNode>(NODE::STRUCT_INIT);
 	codegen.emplace<MemberNode>(NODE::MEMBER);
+	codegen.emplace<NamespaceNode>(NODE::MODULE_ACCESS);
 	codegen.emplace<ArrayNode>(NODE::ARRAY);
 	codegen.emplace<ArrayAccessNode>(NODE::ARRAY_ACCESS);
 	codegen.emplace<ScalarNode>(NODE::SCALAR);
