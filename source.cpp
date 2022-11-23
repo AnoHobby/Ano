@@ -498,7 +498,6 @@ private:
 	std::string name;
 	std::unordered_map<std::string,Namespace> children;
 	std::vector<std::reference_wrapper<Namespace> > access;
-	//std::unordered_map<std::string, ACCESS> accessibility;
 public:
 	Namespace(decltype(name) name):name(name) {
 		access.push_back(std::ref(*this));
@@ -550,6 +549,7 @@ private:
 	std::stack<std::function<bool()>> tasks;
 	int loop=NOT_LOOP;
 	Namespace moduleNamespace;
+	std::vector<std::string> functions;
 public:
 	static constexpr auto WORK_SPACE = "0";
 	CodeGenerator() :
@@ -563,6 +563,15 @@ public:
 	template <class T>
 	auto setDestructorCallback(T&& callback) {
 		variables.changeCallback(std::forward<T>(callback));
+	}
+	auto registFunction(decltype(functions)::value_type name) {
+		functions.push_back(name);
+	}
+	auto func_is_accessible(decltype(functions)::value_type name) {
+		if (name.find_last_of(".") == std::string::npos ||std::ranges::find(functions, name) != functions.end())return true;
+		name.erase(name.find_last_of("."));
+		if (moduleNamespace.to_string().size() < name.size())return false;
+		return !moduleNamespace.to_string().compare(0,name.size(),name);
 	}
 	auto& getLoop() {
 		return loop;
@@ -777,23 +786,7 @@ public:
 		);
 	}
 };
-class ModuleNode :public Codegen {
-private:
-public:
-	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		cg.getModuleNamespace().add(node.branch.front().value);
-		cg.getModuleNamespace().nest(node.branch.front().value);
-		//cg.getEditModule()+=node.branch.front().value+=".";
-		for (auto& object : node.branch.back().branch) {
-			if (object.node == NODE::MODULE)continue;
-			object.branch.front().value.insert(0,cg.getModuleNamespace().to_string());
-		}
-		cg.codegen(node.branch.back());
-		//cg.getEditModule().erase(cg.getEditModule().size()-node.branch.front().value.size());
-		cg.getModuleNamespace().parent();
-		return nullptr;
-	}
-};
+
 class ArrayAccessLoadNode :public Codegen {
 private:
 public:
@@ -1126,7 +1119,7 @@ public:
 			return cg.codegen(node);
 		}
 		else if (
-			is_class(node.branch[NAME].value)&&
+			(is_class(node.branch[NAME].value)&&
 			!cg.getClasses().getClass(node.branch[NAME].value.substr(0, node.branch[NAME].value.find("_"))).is_accessible(
 				cg.getModuleNamespace().to_string(),
 				[&]()->std::string {
@@ -1134,7 +1127,9 @@ public:
 					return "";
 				}(),
 					node.branch[NAME].value.substr(node.branch[NAME].value.find("_")+1)
-			)
+			))
+			||
+			(!is_class(node.branch[NAME].value) && !cg.func_is_accessible(node.branch[NAME].value))
 			) {
 			std::cout << "access error";
 		}
@@ -1160,13 +1155,22 @@ public:
 			cg.getModuleNamespace().nest(nest.value);
 			node.branch.erase(node.branch.begin());
 		}
-		node.branch.front().branch[CallNode::NAME].value.insert(
-			0,
-			cg.getModuleNamespace().to_string()
-		);
+		if (node.branch.front().node == NODE::CALL) {
+			node.branch.front().branch[CallNode::NAME].value.insert(
+				0,
+				cg.getModuleNamespace().to_string()
+			);
+		}
+		else {
+			node.branch.front().value.insert(
+				0,
+				cg.getModuleNamespace().to_string()
+			);
+		}
 		for (auto i = cg.getModuleNamespace().getNestCount() - nestCount; i > 0; --i) {
 			cg.getModuleNamespace().parent();
 		}
+		//if (node.branch.size() == 1)return cg.codegen(node.branch.front());
 		return cg.codegen(node);
 	}
 };
@@ -1182,11 +1186,16 @@ public:
 			return cg.getModule()->getFunction(name)->getReturnType();
 		};
 		auto type = [&]() {
-			if (node.branch.front().node == NODE::REFERENCE) {
+			if (node.branch.front().node==NODE::REFERENCE&&cg.getClasses().is_class(node.branch.front().value)) {
+				node.branch[1].branch[CallNode::NAME].value.insert(0, node.branch.front().value+"_");
+				node.branch.erase(node.branch.begin());
+			}
+			else if (node.branch.front().node == NODE::REFERENCE) {
 				return cg.getVariables().get(node.branch.front().value)->getType()->getNonOpaquePointerElementType();
 			}
 			return getRawRetType(node.branch.front().branch[CallNode::NAME].value);
 		}();
+		if (node.branch.size() == 1)return cg.codegen(node.branch.front());
 		auto iter = node.branch.begin();
 		for (auto member = node.branch.begin(); member != node.branch.end(); ++member) {
 			if (member->node != NODE::CALL)continue;
@@ -1208,7 +1217,12 @@ public:
 					member
 				);
 			}
-			if (std::distance(iter, member)) {
+			if (cg.getClasses().getClass(std::move(type->getStructName().str())).get(member->branch[CallNode::NAME].value.substr(member->branch[CallNode::NAME].value.find_last_of("_") + 1)).getOffset() == MemberInfo::OFFSET::ASSOCIATE) {
+				cg.codegen(*iter);
+			}
+			else if (
+				std::distance(iter, member)&&
+				cg.getClasses().getClass(std::move(type->getStructName().str())).get(member->branch[CallNode::NAME].value.substr(member->branch[CallNode::NAME].value.find_last_of("_")+1)).getOffset() == MemberInfo::OFFSET::FUNCTION) {
 				member->branch[CallNode::ARGUMENTS].branch.insert(
 					member->branch[CallNode::ARGUMENTS].branch.begin(),
 					self
@@ -1255,6 +1269,9 @@ public:
 		//SIZE
 	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		if (node.branch[ACCESSIBILITY].value.front()=='p') {
+			cg.registFunction(node.branch[NAME].value);
+		}
 		std::vector<llvm::Type*> args(node.branch[ARGUMENTS].branch.size());
 		for (auto i = 0; auto & arg : args) {
 			arg = cg.getType()(node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::TYPE].linkBranchStr());
@@ -1360,7 +1377,25 @@ public:
 		return cg.getModule()->getFunction(node.branch[NAME].value);
 	}
 };
-
+class ModuleNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		cg.getModuleNamespace().add(node.branch.front().value);
+		cg.getModuleNamespace().nest(node.branch.front().value);
+		for (auto& object : node.branch.back().branch) {
+			if (object.node == NODE::MODULE)continue;
+			if (object.node == NODE::FUNCTION) {
+				object.branch[FunctionNode::NAME].value.insert(0, cg.getModuleNamespace().to_string());
+				continue;
+			}
+			object.branch.front().value.insert(0, cg.getModuleNamespace().to_string());
+		}
+		cg.codegen(node.branch.back());
+		cg.getModuleNamespace().parent();
+		return nullptr;
+	}
+};
 class DefineNode :public Codegen {
 private:
 public:
@@ -1412,6 +1447,9 @@ public:
 		std::vector <llvm::Type* > types;
 		cg.getType().emplace(structType->getName().str(), structType);
 		cg.getClasses().addClass(cg.getModuleNamespace().to_string(),node.branch[NAME].value);
+		const auto is_static = [](Node &member) {
+			return (member.branch[FunctionNode::ACCESSIBILITY].value.front() == 'a' || member.branch[FunctionNode::ACCESSIBILITY].value.front() == 's');
+		};
 		for (ACCESS access; auto & member : node.branch[MEMBERS].branch) {
 			if (member.node == NODE::CLASS_ACCESS) {
 				access = std::unordered_map<decltype(member.value), ACCESS>{
@@ -1421,8 +1459,13 @@ public:
 				}.at(member.branch.front().value);
 				continue;
 			}
-			if (member.node == NODE::FUNCTION) {
-				cg.getClasses().emplace(node.branch[NAME].value, member.branch[FunctionNode::NAME].value, access, MemberInfo::OFFSET::FUNCTION);
+			if (member.node == NODE::FUNCTION ) {
+				cg.getClasses().emplace(
+					node.branch[NAME].value,
+					member.branch[FunctionNode::NAME].value,
+					access,
+					is_static(member) ? MemberInfo::OFFSET::ASSOCIATE : MemberInfo::OFFSET::FUNCTION
+				);
 				continue;
 			}
 			types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
@@ -1435,15 +1478,17 @@ public:
 				0,
 				structType->getName().str() + "_"
 			);
-			Node self;
-			self.branch.resize(2/*TypeIdentNode branch max size*/);
-			self.branch.front().branch.resize(1);
-			self.branch.front().branch.front().value = structType->getName().str() + "*";
-			self.branch[TypeIdentNode::NAME].value = "this";
-			member.branch[FunctionNode::ARGUMENTS].branch.emplace(//push_back is ok
-				member.branch[FunctionNode::ARGUMENTS].branch.begin(),
-				self
-			);
+			if (!is_static(member)) {
+				Node self;
+				self.branch.resize(2/*TypeIdentNode branch max size*/);
+				self.branch.front().branch.resize(1);
+				self.branch.front().branch.front().value = structType->getName().str() + "*";
+				self.branch[TypeIdentNode::NAME].value = "this";
+				member.branch[FunctionNode::ARGUMENTS].branch.emplace(//push_back is ok
+					member.branch[FunctionNode::ARGUMENTS].branch.begin(),
+					self
+				);
+			}
 			cg.codegen(member);
 		}
 	}
@@ -1490,7 +1535,7 @@ int main(int args, char* argv[]) {
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto string = BNF(TOKEN::STRING).regist(NODE::STRING);
-	auto type = BNF(TOKEN::IDENT).push()[(BNF("[").push() + number.push() + BNF("]").push()).loop()][BNF("*").push().loop()];
+	auto type = BNF(TOKEN::IDENT).push()[(BNF(".").push() + BNF(TOKEN::IDENT).push()).loop()][(BNF("[").push() + number.push() + BNF("]").push()).loop()][BNF("*").push().loop()];
 	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
 	auto reference = (BNF("&") + variable).regist(NODE::REFERENCE);
 	auto floatNum = (number.push() + BNF(".").push() + number.push()).regist(NODE::FLOATING_POINT);//.number|f
@@ -1529,7 +1574,7 @@ int main(int args, char* argv[]) {
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
-	auto function = ((BNF("fn")|BNF("pvt")|BNF("pub")).push() + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
+	auto function = ((BNF("function")|BNF("fn")|BNF("pub")|BNF("public")|BNF("associate")|BNF("assoc")|BNF("static")).push() + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
 	auto memberRegist = (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).regist(NODE::MEMBER_REGIST);
 	auto accessExpr = ((BNF("private") | BNF("public") | BNF("protected")).push() + BNF(":")).regist(NODE::CLASS_ACCESS);
 	auto classExpr = (BNF("class") + BNF(TOKEN::IDENT).push() + BNF("{")[accessExpr.push() + (accessExpr | memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::CLASS);
@@ -1617,3 +1662,8 @@ int main(int args, char* argv[]) {
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
+
+/*
+関連関数はnamespaceを活用すると簡単に実装できる
+だが、アクセス指定子のもんだいがでてくるので別々の機能としている
+*/
