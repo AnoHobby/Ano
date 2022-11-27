@@ -114,6 +114,8 @@ enum class NODE {
 	DEFINE,
 	MODULE,
 	MODULE_ACCESS,
+	NEW,
+	SIZEOF
 };
 class Node {
 private:
@@ -551,7 +553,7 @@ private:
 	Namespace moduleNamespace;
 	std::vector<std::string> functions;
 public:
-	static constexpr auto WORK_SPACE = "0";
+	static constexpr auto WORK_SPACE = "0",ALLOCA = "A",MALLOC="M";
 	CodeGenerator() :
 		mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
 		builder(context),
@@ -804,16 +806,17 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		auto arrayRef = cg.codegen(node.branch[0]);
-		for (auto& index : node.branch[1].branch) {
-			arrayRef = cg.getBuilder().CreateGEP(
-				arrayRef->getType()->getNonOpaquePointerElementType(),
-				arrayRef,
-				{
-					llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
-					cg.codegen(index),
-				}
-			);
-		}
+		cg.getBuilder().CreateInBoundsGEP(arrayRef->getType(), arrayRef, cg.getBuilder().getInt32(0));
+		//for (auto& index : node.branch[1].branch) {
+		//	arrayRef = cg.getBuilder().CreateGEP(
+		//		arrayRef->getType()->getNonOpaquePointerElementType(),
+		//		arrayRef,
+		//		{
+		//			llvm::ConstantInt::get(cg.getBuilder().getInt32Ty(),0),
+		//			cg.codegen(index),
+		//		}
+		//	);
+		//}
 		return arrayRef;
 	}
 };
@@ -844,7 +847,7 @@ public:
 			}
 			return llvm::ArrayType::get(self(self, node.branch[0]), node.branch.size());
 		};
-		auto arrayValue = cg.getBuilder().CreateAlloca(createType(createType, node));
+		auto arrayValue = cg.getBuilder().CreateAlloca(createType(createType, node),nullptr,cg.ALLOCA);
 		auto store = [&](auto& self, auto& node, auto arrayValue)->void {
 			for (auto i = 0; i < node.branch.size(); ++i) {
 				if (node.branch[i].node == NODE::ARRAY) {
@@ -885,7 +888,7 @@ public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		auto* value = cg.codegen(node.branch[0]);
 		if (value->getType()->isPointerTy())return value;
-		auto* variable = cg.getBuilder().CreateAlloca(value->getType());
+		auto* variable = cg.getBuilder().CreateAlloca(value->getType(), nullptr, cg.ALLOCA);
 		cg.getBuilder().CreateStore(value, variable);
 		return variable;
 	}
@@ -1146,7 +1149,7 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
 		node.node = NODE::MEMBER;
-		if (node.branch.front().node != NODE::REFERENCE || cg.getVariables().find(node.branch.front().value)/* || !cg.getModuleNamespace().exists(node.branch.front().value)*/) {
+		if (node.branch.front().node != NODE::REFERENCE || cg.getVariables().find(node.branch.front().value)) {
 			return cg.codegen(node);
 		}
 		const auto nestCount = cg.getModuleNamespace().getNestCount();
@@ -1310,7 +1313,7 @@ public:
 				else {
 					cg.getVariables().insert_or_assign(
 						node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::NAME].value,
-						cg.getBuilder().CreateAlloca(arg.getType(), nullptr, node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::NAME].value)
+						cg.getBuilder().CreateAlloca(arg.getType(), nullptr, cg.ALLOCA)
 					);
 					cg.getBuilder().CreateStore(&arg, cg.getVariables().get(node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::NAME].value));
 				}
@@ -1318,7 +1321,7 @@ public:
 			}
 			cg.getRetBlock() = llvm::BasicBlock::Create(cg.getBuilder().getContext(),"return", cg.getBuilder().GetInsertBlock()->getParent());
 			cg.getVariables().nest();
-			cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getRetType() == cg.getBuilder().getVoidTy() ? nullptr : cg.getBuilder().CreateAlloca(cg.getRetType()));
+			cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getRetType() == cg.getBuilder().getVoidTy() ? nullptr : cg.getBuilder().CreateAlloca(cg.getRetType(), nullptr, cg.ALLOCA));
 			cg.codegen(node.branch[BLOCK]);
 			cg.getBuilder().SetInsertPoint(cg.getRetBlock());
 			Node retVal;
@@ -1400,7 +1403,7 @@ class DefineNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateAlloca(cg.getType()(node.linkBranchStr()));
+		return cg.getBuilder().CreateAlloca(cg.getType()(node.linkBranchStr()), nullptr, cg.ALLOCA);
 	}
 };
 class ConstructorNode :public Codegen {
@@ -1408,7 +1411,7 @@ private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg,Node node)override {
 		cg.getVariables().nest();
-		cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getBuilder().CreateAlloca(cg.getType()(node.branch[CallNode::NAME].value)));
+		cg.getVariables().insert_or_assign(cg.WORK_SPACE, cg.getBuilder().CreateAlloca(cg.getType()(node.branch[CallNode::NAME].value), nullptr, cg.ALLOCA));
 		node.branch[CallNode::ARGUMENTS].branch.insert(
 			node.branch[CallNode::ARGUMENTS].branch.begin(),
 			Node()
@@ -1512,6 +1515,37 @@ public:
 		);
 	}
 };
+class NewNode:public Codegen{
+private:
+public:
+	llvm::Value *codegen(CodeGenerator &cg,Node node)override {
+		Node size;
+		size.node = NODE::MUL;
+		size.branch.resize(1);
+		size.branch.front().node = NODE::SIZEOF;
+		size.branch.front().branch.resize(1);
+		size.branch.front().branch.front().value = node.branch.front().linkBranchStr();
+		size.branch.push_back(node.branch.back());
+		const auto value = llvm::CallInst::CreateMalloc(
+			cg.getBuilder().GetInsertBlock(),
+			cg.getType()(node.branch.front().linkBranchStr())->getPointerTo(),
+			cg.getType()(node.branch.front().linkBranchStr()),
+			cg.codegen(size),
+			nullptr,
+			nullptr,
+			""
+		);
+		cg.getBuilder().Insert(value)->setName(cg.MALLOC);
+		return value;
+	}
+};
+class SizeofNode :public Codegen {
+private:
+public:
+	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
+		return llvm::ConstantExpr::getSizeOf(cg.getType()(node.linkBranchStr()));
+	}
+};
 class JIT {
 private:
 	llvm::ExecutionEngine* engine;
@@ -1535,15 +1569,20 @@ int main(int args, char* argv[]) {
 	auto iter = tokens.begin();
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto string = BNF(TOKEN::STRING).regist(NODE::STRING);
-	auto type = BNF(TOKEN::IDENT).push()[(BNF(".").push() + BNF(TOKEN::IDENT).push()).loop()][(BNF("[").push() + number.push() + BNF("]").push()).loop()][BNF("*").push().loop()];
+	auto typeKind = BNF(TOKEN::IDENT).push()[(BNF(".").push() + BNF(TOKEN::IDENT).push()).loop()];
+	auto type = typeKind[(BNF("[").push() + number.push() + BNF("]").push()).loop()][BNF("*").push().loop()];
+	auto sizeofExpr = BNF("sizeof")+BNF("(")+type + BNF(")").regist(NODE::SIZEOF);
+	//auto newExpr = BNF("new") + type;
 	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
-	auto reference = (BNF("&") + variable).regist(NODE::REFERENCE);
 	auto floatNum = (number.push() + BNF(".").push() + number.push()).regist(NODE::FLOATING_POINT);//.number|f
 	auto intNum = (number.push() + BNF(TOKEN::IDENT).push()).regist(NODE::INT);
 	BNF expr;
+	auto newExpr = BNF("new")+BNF("<")+typeKind.push() + BNF(">") + BNF("(") + (*expr).push() + BNF(")").regist(NODE::NEW);
+	//auto newExpr = BNF("new") + typeKind[BNF("*").push().loop()].push() + (BNF("[") + (*expr).push() + BNF("]")).loop().push().regist(NODE::NEW);
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
 	auto arrayAccess = (variable.regist(NODE::REFERENCE).push() + (BNF("[") + (*expr).push() + BNF("]")).loop().push()).regist(NODE::ARRAY_ACCESS);
 	auto member = ((call | variable.regist(NODE::REFERENCE)).push() + ((BNF(".") + (call | variable.regist(NODE::REFERENCE))).push().loop())).regist(NODE::MODULE_ACCESS);
+	auto reference = BNF("&") + (arrayAccess|member | (variable).regist(NODE::REFERENCE));
 	auto arrayExpr = (BNF("[") + ((*expr).push()[BNF(",")]).loop() + BNF("]")).regist(NODE::ARRAY);
 	BNF  add;
 	auto compare = (*add).push() + 
@@ -1572,9 +1611,10 @@ int main(int args, char* argv[]) {
 	auto block = (BNF("{")[(((*expr).push() + BNF(";")) | BNF(";")).loop()] + BNF("}")).regist(NODE::BLOCK);
 	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()+((BNF("else") + (*expr).push())|BNF().push())).regist(NODE::IF);
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
-	expr = ret | let | whileExpr | ifExpr | assign | compare | block;
+	expr = ret | let | whileExpr | ifExpr |newExpr|sizeofExpr| assign | compare | block;
 	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
-	auto function = ((BNF("function")|BNF("fn")|BNF("pub")|BNF("public")|BNF("associate")|BNF("assoc")|BNF("static")).push() + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
+	auto defaultFuncDescriptor = BNF("function") | BNF("fn");
+	auto function = (((BNF("pub")|BNF("public")|BNF("associate")|BNF("assoc")|BNF("static")).push()[defaultFuncDescriptor]|defaultFuncDescriptor.push()) + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
 	auto memberRegist = (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).regist(NODE::MEMBER_REGIST);
 	auto accessExpr = ((BNF("private") | BNF("public") | BNF("protected")).push() + BNF(":")).regist(NODE::CLASS_ACCESS);
 	auto classExpr = (BNF("class") + BNF(TOKEN::IDENT).push() + BNF("{")[accessExpr.push() + (accessExpr | memberRegist | function).push().loop()].push() + BNF("}")).regist(NODE::CLASS);
@@ -1582,26 +1622,30 @@ int main(int args, char* argv[]) {
 	auto program = (moduleExpr|classExpr | externFunc | function).push().regist(NODE::BLOCK).loop();
 	CodeGenerator codegen;
 	codegen.setDestructorCallback([&codegen,&call](std::string name,llvm::Value* value) {
-		if (!
-			(
-			value &&
-			name!="this"&&
+		if (!value)return;
+		if (value->getName().front() == codegen.MALLOC[0]) {//mの時ラムダを差し替えてもいい
+			codegen.registTask([&codegen,value] {
+				codegen.getBuilder().Insert(llvm::CallInst::CreateFree(value, codegen.getBuilder().GetInsertBlock()));
+				return true;
+				});
+		}
+		else if (
+			value->getName().front()==codegen.ALLOCA[0] &&
 			value->getType()->isPointerTy() &&
 			value->getType()->getNonOpaquePointerElementType()->isStructTy()
-			)
-			) {
-			return;
+			) 
+		{
+			codegen.registTask(
+				[&codegen, value]() {
+					codegen.getBuilder().CreateCall(
+						codegen.getModule()->getFunction(
+							std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str()) + "_drop"
+						),
+						{ value });
+					return true;
+				}
+			);
 		}
-		codegen.registTask(
-			[&codegen, value]() {
-				codegen.getBuilder().CreateCall(
-					codegen.getModule()->getFunction(
-						std::move(value->getType()->getNonOpaquePointerElementType()->getStructName().str()) + "_drop"
-					),
-					{ value });
-				return true;
-			}
-		);
 		if (
 			!(
 				codegen.getVariables().getNestCount() != codegen.getVariables().getDepth(name) &&
@@ -1653,6 +1697,8 @@ int main(int args, char* argv[]) {
 	codegen.emplace<WhileNode>(NODE::WHILE);
 	codegen.emplace<ArrayAccessLoadNode>(NODE::ARRAY_ACCESS_LOAD);
 	codegen.emplace<MemberLoadNode>(NODE::MEMBER_LOAD);
+	codegen.emplace<NewNode>(NODE::NEW);
+	codegen.emplace<SizeofNode>(NODE::SIZEOF);
 	codegen.codegen(program(iter));
 	codegen.getModule()->print(llvm::outs(), nullptr);
 	JIT engine(codegen.getModule());
@@ -1664,6 +1710,18 @@ int main(int args, char* argv[]) {
 }
 
 /*
-関連関数はnamespaceを活用すると簡単に実装できる
-だが、アクセス指定子のもんだいがでてくるので別々の機能としている
+idea
+template クラスのnew<型>(個数)
+class new{
+public:
+template <T,>
+fn init(i32 size){
+m=malloc<T>(size);
+foreach(let obj:m)obj.init();
+}
+fn drop(){
+foreach(obj,m)obj.drop();j
+}
+
+}
 */
