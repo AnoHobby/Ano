@@ -123,12 +123,12 @@ public:
 	NODE node = NODE::NONE;
 	std::string value;
 	std::vector<Node> branch;
-	auto linkBranchStr() {
+	auto linkBranchStr() const{
 		std::string str;
 		for (auto& child : branch) {
 			str += child.value;
 		}
-		return str;
+		return std::move(str);
 	}
 };
 class BNF {
@@ -251,7 +251,7 @@ return node;
 class Type {
 private:
 	std::unordered_map<std::string, llvm::Type*> types;
-	std::function<decltype(types)::mapped_type(std::string)> analyze;
+	std::function<decltype(types)::mapped_type(const Node&)> analyze;
 public:
 	Type(llvm::IRBuilder<>& builder) {
 		types = {
@@ -260,28 +260,22 @@ public:
 				{ "bool",builder.getInt1Ty() },
 				{ "void",builder.getVoidTy() },
 		};
-		analyze = [&](std::string str)->llvm::Type* {
-			const auto pointer = str.size() - str.find_last_not_of('*') - 1;
-			str.erase(str.size() - pointer);
-			std::queue<unsigned> arraySizes;
-			for (auto pos = str.find_last_of('['); pos != std::string::npos; str.erase(pos), pos = str.find_last_of('[')) {
-				arraySizes.push(std::stoi(str.substr(pos + 1, str.size() - 3)));//
+		analyze = [&](const Node &node)->llvm::Type* {
+			llvm::Type* type;//=nullptr
+			if (node.branch.front().branch.back().value.front() == 'i') {
+				type = builder.getIntNTy(std::stoi(node.branch.front().branch.back().value.substr(1)));
 			}
-			auto type = [&]()->llvm::Type* {
-				if (types.count(str)) {
-					return types[str];
-				}
-				else if (str.front() == 'i') {
-					return builder.getIntNTy(std::stoi(str.substr(1)));
-				}
-				return builder.getVoidTy();
-			}();
-			while (!arraySizes.empty()) {
-				type = llvm::ArrayType::get(type, arraySizes.front());
-				arraySizes.pop();
+			else if (!types.count(node.branch.front().linkBranchStr()))return type;
+			else {
+				type = types.at(node.branch.front().linkBranchStr());
 			}
-			for (auto i = 0; i < pointer; ++i) {
-				type = type->getPointerTo();
+			if (node.branch.size() < 2)return type;
+			for (const auto& op : node.branch.back().branch) {
+				if (op.value == "*"){
+					type=type->getPointerTo();
+					continue;
+				}
+				type=llvm::ArrayType::get(type,std::stoi(op.value));
 			}
 			return type;
 		};
@@ -292,9 +286,17 @@ public:
 	auto erase(decltype(types)::key_type&& key) {
 		types.erase(std::forward<decltype(types)::key_type>(key));
 	}
-	auto operator()(const std::string str) {
-		return analyze(std::move(str));
+	auto operator()(const Node &node) {
+		return analyze(node);
 	}
+	auto operator()(const std::string str) {
+		Node node;
+		node.branch.resize(2);
+		node.branch.front().branch.resize(1);
+		node.branch.front().branch.front().value = std::move(str);
+		return analyze(node);
+	}
+
 };
 class Variables {
 private:
@@ -1277,7 +1279,7 @@ public:
 		}
 		std::vector<llvm::Type*> args(node.branch[ARGUMENTS].branch.size());
 		for (auto i = 0; auto & arg : args) {
-			arg = cg.getType()(node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::TYPE].linkBranchStr());
+			arg = cg.getType()(node.branch[ARGUMENTS].branch[i].branch[TypeIdentNode::TYPE]);
 			++i;
 		}
 		for (auto& member : node.branch[CONSTRUCTOR].branch) {
@@ -1364,7 +1366,7 @@ public:
 			cg.getVariables().exitScope();
 		};
 		if (node.branch[TYPE].branch.size()) {
-			cg.getRetType() = cg.getType()(node.branch[TYPE].linkBranchStr());
+			cg.getRetType() = cg.getType()(node.branch[TYPE]);
 		}
 		else {
 			cg.getRetType() = cg.getBuilder().getVoidTy();
@@ -1374,7 +1376,7 @@ public:
 		cg.getModule()->getFunction(node.branch[NAME].value)->eraseFromParent();
 		cg.getVariables().setMode(false);
 		if (node.branch[TYPE].branch.size()) {
-			cg.getRetType() = cg.getType()(node.branch[TYPE].linkBranchStr());
+			cg.getRetType() = cg.getType()(node.branch[TYPE]);
 		}
 		createFunction();
 		return cg.getModule()->getFunction(node.branch[NAME].value);
@@ -1403,7 +1405,7 @@ class DefineNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return cg.getBuilder().CreateAlloca(cg.getType()(node.linkBranchStr()), nullptr, cg.ALLOCA);
+		return cg.getBuilder().CreateAlloca(cg.getType()(node), nullptr, cg.ALLOCA);
 	}
 };
 class ConstructorNode :public Codegen {
@@ -1471,7 +1473,7 @@ public:
 				);
 				continue;
 			}
-			types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE].linkBranchStr()));
+			types.push_back(cg.getType()(member.branch[TypeIdentNode::TYPE]));
 			cg.getClasses().emplace(node.branch[NAME].value, member.branch[TypeIdentNode::NAME].value, access);
 		}
 		structType->setBody(types, false);
@@ -1499,16 +1501,22 @@ public:
 class ExternNode :public Codegen {
 private:
 public:
+	enum BRANCH {
+		RETURN_TYPE,
+		NAME,
+		ARGUMENTS,
+
+	};
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		std::vector<llvm::Type*> args(node.branch[2].branch.size());
+		std::vector<llvm::Type*> args(node.branch[ARGUMENTS].branch.size());
 		for (auto i = 0; auto & arg : args) {
-			arg = cg.getType()(node.branch[2].branch[i].linkBranchStr());
+			arg = cg.getType()(node.branch[ARGUMENTS].branch[i]);
 			++i;
 		}
 		cg.getModule()->getOrInsertFunction(
-			node.branch[1/*function name*/].value,//function name
+			node.branch[NAME].value,
 			llvm::FunctionType::get(
-				cg.getType()(node.branch[0].value),//return type
+				cg.getType()(node.branch[RETURN_TYPE]),
 				llvm::ArrayRef(args)
 				, node.branch.size() == 4
 			)
@@ -1528,8 +1536,8 @@ public:
 		size.branch.push_back(node.branch.back());
 		const auto value = llvm::CallInst::CreateMalloc(
 			cg.getBuilder().GetInsertBlock(),
-			cg.getType()(node.branch.front().linkBranchStr())->getPointerTo(),
-			cg.getType()(node.branch.front().linkBranchStr()),
+			cg.getType()(node.branch.front())->getPointerTo(),
+			cg.getType()(node.branch.front()),
 			cg.codegen(size),
 			nullptr,
 			nullptr,
@@ -1543,7 +1551,7 @@ class SizeofNode :public Codegen {
 private:
 public:
 	llvm::Value* codegen(CodeGenerator& cg, Node node)override {
-		return llvm::ConstantExpr::getSizeOf(cg.getType()(node.linkBranchStr()));
+		return llvm::ConstantExpr::getSizeOf(cg.getType()(node));
 	}
 };
 class JIT {
@@ -1570,15 +1578,13 @@ int main(int args, char* argv[]) {
 	auto number = BNF(TOKEN::NUMBER).regist(NODE::NUMBER);
 	auto string = BNF(TOKEN::STRING).regist(NODE::STRING);
 	auto typeKind = BNF(TOKEN::IDENT).push()[(BNF(".").push() + BNF(TOKEN::IDENT).push()).loop()];
-	auto type = typeKind[(BNF("[").push() + number.push() + BNF("]").push()).loop()][BNF("*").push().loop()];
+	auto type = (typeKind.push()[(BNF("*").push() | (BNF("[") + number.push() + BNF("]"))).loop().push()]);
 	auto sizeofExpr = BNF("sizeof")+BNF("(")+type + BNF(")").regist(NODE::SIZEOF);
-	//auto newExpr = BNF("new") + type;
 	auto variable = BNF(TOKEN::IDENT).regist(NODE::VARIABLE);
 	auto floatNum = (number.push() + BNF(".").push() + number.push()).regist(NODE::FLOATING_POINT);//.number|f
 	auto intNum = (number.push() + BNF(TOKEN::IDENT).push()).regist(NODE::INT);
 	BNF expr;
 	auto newExpr = BNF("new")+BNF("<")+typeKind.push() + BNF(">") + BNF("(") + (*expr).push() + BNF(")").regist(NODE::NEW);
-	//auto newExpr = BNF("new") + typeKind[BNF("*").push().loop()].push() + (BNF("[") + (*expr).push() + BNF("]")).loop().push().regist(NODE::NEW);
 	auto call = (BNF(TOKEN::IDENT).push() + BNF("(")[(*expr).push()[BNF(",")].loop()].push() + BNF(")")).regist(NODE::CALL);
 	auto arrayAccess = (variable.regist(NODE::REFERENCE).push() + (BNF("[") + (*expr).push() + BNF("]")).loop().push()).regist(NODE::ARRAY_ACCESS);
 	auto member = ((call | variable.regist(NODE::REFERENCE)).push() + ((BNF(".") + (call | variable.regist(NODE::REFERENCE))).push().loop())).regist(NODE::MODULE_ACCESS);
@@ -1612,7 +1618,7 @@ int main(int args, char* argv[]) {
 	auto ifExpr = ((BNF("if")[BNF("(")] + (*expr).push()[BNF(")")] + (*expr).push()).push()+((BNF("else") + (*expr).push())|BNF().push())).regist(NODE::IF);
 	auto whileExpr = (BNF("while")[BNF("(")] + (*expr).push()[BNF(")")] + block.push()).regist(NODE::WHILE);
 	expr = ret | let | whileExpr | ifExpr |newExpr|sizeofExpr| assign | compare | block;
-	auto externFunc = (BNF("extern") + type + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
+	auto externFunc = (BNF("extern") + type.push() + BNF(TOKEN::IDENT).push() + BNF("(")[(type).push()[BNF(",")].loop()].push()[(BNF(".") + BNF(".") + BNF(".")).push()] + BNF(")") + BNF(";")).regist(NODE::EXTERN);
 	auto defaultFuncDescriptor = BNF("function") | BNF("fn");
 	auto function = (((BNF("pub")|BNF("public")|BNF("associate")|BNF("assoc")|BNF("static")).push()[defaultFuncDescriptor]|defaultFuncDescriptor.push()) + BNF(TOKEN::IDENT).push() + BNF("(")[(type.push() + BNF(TOKEN::IDENT).push())[BNF(",")].push().loop()].push() + BNF(")")[BNF("-") + BNF(">") + type].push() + BNF()[BNF(":") + (call.push()[BNF(",")]).loop()].push() + block.push()).regist(NODE::FUNCTION);
 	auto memberRegist = (type.push() + BNF(TOKEN::IDENT).push() + BNF(";")).regist(NODE::MEMBER_REGIST);
@@ -1708,20 +1714,3 @@ int main(int args, char* argv[]) {
 	llvm::outs().flush();
 	return EXIT_SUCCESS;
 }
-
-/*
-idea
-template ÉNÉâÉXÇÃnew<å^>(å¬êî)
-class new{
-public:
-template <T,>
-fn init(i32 size){
-m=malloc<T>(size);
-foreach(let obj:m)obj.init();
-}
-fn drop(){
-foreach(obj,m)obj.drop();j
-}
-
-}
-*/
