@@ -158,17 +158,25 @@ public:
 		);
 	}
 };
-class Floating_Point :public parser::Node {
+class Float :public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
 		return llvm::ConstantFP::get(
-			branch.back()->value == "f" ?
-			llvm::Type::getFloatTy(builder.getBuilder().getContext()) :
-			llvm::Type::getDoubleTy(builder.getBuilder().getContext()),
+			llvm::Type::getFloatTy(builder.getBuilder().getContext()),
 			std::stod(branch.front()->value)
 		);
 
+	}
+};
+class Double :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return llvm::ConstantFP::get(
+			llvm::Type::getDoubleTy(builder.getBuilder().getContext()),
+			std::stod(branch.front()->value)
+		);
 	}
 };
 class Return :public parser::Node {
@@ -344,18 +352,7 @@ public:
 			COND,
 			IF,
 			ELSE,
-			EXPRESSION_FLAG
 		};
-		if (EXPRESSION_FLAG < branch.size()) {
-			branch.pop_back();
-			auto block = std::make_unique<Block>();
-			block->branch.emplace_back(std::make_unique<Node>());
-			block->branch.front()->value = "if";
-			block->branch.emplace_back(std::make_unique<Node>());
-			block->branch.back()->branch.emplace_back(std::make_unique<If>());
-			block->branch.back()->branch.front()->branch= std::move(branch);
-			return block->codegen(builder);
-		}
 		//const auto ifblock=
 		auto* ifBlock = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "if", builder.getBuilder().GetInsertBlock()->getParent()),
 			* elseBlock = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "else", builder.getBuilder().GetInsertBlock()->getParent()),
@@ -456,20 +453,19 @@ int main() {
 	//for (const auto& node : source) {
 	//	std::cout << node->value << std::endl;
 	//}
-	//dead idea:functionのブロックをreturn のnamedblockとして扱う->スコープが足りない
 	ident = BNF().set<Tag<TAG::IDENT>>().regist<Load>();
 	number = BNF().set<Tag<TAG::DIGIT>>();
 	BNF integer = (~number + ~ident).regist<INT>();
-	BNF floating_point = (~(number, BNF("."), number) + ~(BNF("f") | BNF("d"))).regist<Floating_Point>();
+	BNF floating_point = (~(number, BNF("."), number) + (BNF("f").regist<Float>() | BNF("d").regist<Double>()));
 	BNF expr;
 	BNF assign = (~ident.regist<Reference>() + BNF("=") + ~&expr).regist<Assign>();
 	BNF let = (BNF("let") + ((BNF("mut") + ~ident + BNF("=") + ~(~&expr).regist<Mutable>()) | assign)).regist<Let>();
 	BNF reference = (BNF("&") + ident).regist<Reference>();
-	BNF ret = ((BNF("return")+~&expr/*ident*/ + ~&expr) |(~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();//identだが、return namedblock{}を{return,variable,block}と解釈するのでexpr
+	BNF ret = ((BNF("return")+~&expr/*ident*/ + ~&expr) |(~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();
 	BNF if_statement = BNF("if") + BNF("(") + ~&expr + BNF(")") + ~&expr;
 	if_statement = ((if_statement + BNF("else")+ (~(&if_statement | &expr))) | if_statement).regist<If>();
-	//if_statement = ((if_statement + BNF("else") + ((~(&if_statement | &expr) + ~BNF(";")) | (~(&if_statement | &expr)))) | if_statement).regist<If>();
-	BNF if_expression = (if_statement + ~BNF(";")).regist<If>();
+	//BNF if_expression = (if_statement + ~BNF(";")).regist<If>();//IfNodeで分岐しなければならない
+	BNF if_expression = (~BNF("if") + BNF("(") + ~~&expr + BNF(")") + ~~&expr + BNF("else") + (~~if_statement|~~&expr) + BNF(";")).regist<Block>();
 	BNF statement = (~&expr + BNF(";"))| ~&expr;//expr+BNF(";")|expr
 	BNF statements = (statement + &statements) | statement;
 	BNF block = ((BNF("{")|~ident+BNF("{")) + (~BNF("}") | (~statements + BNF("}")))).regist < Block >();
