@@ -381,9 +381,11 @@ public:
 			builder.getBuilder().CreateBr(after);
 		}
 		builder.getBuilder().SetInsertPoint(after);
-		if (!after->getInstList().size()) {
+		if (after->getParent()&&!after->getInstList().size()) {
 			after->eraseFromParent();
 		}
+		
+
 		return nullptr;//todo:値を返す
 	}
 };
@@ -443,7 +445,8 @@ int main() {
 		BNF("S") | BNF("T") | BNF("U") | BNF("V") |
 		BNF("W") | BNF("X") | BNF("Y") | BNF("Z");
 	BNF ident_first = (alphabet | BNF("_"));
-	BNF ident_next = (ident_first | digit, &ident_next) | ident_first | digit;
+	BNF ident_next = (ident_first | digit);
+	ident_next=(ident_next, &ident_next) | ident_next;
 	BNF ident = (ident_first, ident_next) | ident_first;
 	BNF symbol = BNF("=") | BNF(";") | BNF(".") | BNF("{") | BNF("}") | BNF(";") | BNF("(") | BNF(")") | BNF(",") | BNF("&") | BNF(":");
 	BNF number = (digit, &number) | digit;
@@ -453,6 +456,7 @@ int main() {
 	//for (const auto& node : source) {
 	//	std::cout << node->value << std::endl;
 	//}
+	//dead idea:functionのブロックをreturn のnamedblockとして扱う->スコープが足りない
 	ident = BNF().set<Tag<TAG::IDENT>>().regist<Load>();
 	number = BNF().set<Tag<TAG::DIGIT>>();
 	BNF integer = (~number + ~ident).regist<INT>();
@@ -461,10 +465,11 @@ int main() {
 	BNF assign = (~ident.regist<Reference>() + BNF("=") + ~&expr).regist<Assign>();
 	BNF let = (BNF("let") + ((BNF("mut") + ~ident + BNF("=") + ~(~&expr).regist<Mutable>()) | assign)).regist<Let>();
 	BNF reference = (BNF("&") + ident).regist<Reference>();
-	BNF ret = ((BNF("return")+~ident + ~&expr) |(~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();//return +~ident
+	BNF ret = ((BNF("return")+~&expr/*ident*/ + ~&expr) |(~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();//identだが、return namedblock{}を{return,variable,block}と解釈するのでexpr
 	BNF if_statement = BNF("if") + BNF("(") + ~&expr + BNF(")") + ~&expr;
-	//if_statement = ((if_statement + BNF("else") + ~(&if_statement | &expr)) | if_statement).regist<If>();
-	if_statement = ((if_statement + BNF("else")+ ((~(&if_statement | &expr) + ~BNF(";")) | (~(&if_statement | &expr)))) | if_statement).regist<If>();
+	if_statement = ((if_statement + BNF("else")+ (~(&if_statement | &expr))) | if_statement).regist<If>();
+	//if_statement = ((if_statement + BNF("else") + ((~(&if_statement | &expr) + ~BNF(";")) | (~(&if_statement | &expr)))) | if_statement).regist<If>();
+	BNF if_expression = (if_statement + ~BNF(";")).regist<If>();
 	BNF statement = (~&expr + BNF(";"))| ~&expr;//expr+BNF(";")|expr
 	BNF statements = (statement + &statements) | statement;
 	BNF block = ((BNF("{")|~ident+BNF("{")) + (~BNF("}") | (~statements + BNF("}")))).regist < Block >();
@@ -478,30 +483,31 @@ int main() {
 	BNF variable_length = BNF(".") + BNF(".")+BNF(".");
 	BNF extern_argument = (~type + BNF(",") + &extern_argument) | ~type;
 	BNF extern_function = (BNF("extern") + ~type+~ident + BNF("(") + ((~variable_length + ~BNF(")")) |~BNF(")") | (~extern_argument + ((BNF(",")+~variable_length+BNF(")"))|BNF(")")))) + BNF(";")).regist<Extern>();//上と同じ
-	expr = let | ret | if_statement|floating_point | integer | assign | reference | block | call | ident;
+	expr = let | block|ret |if_expression|if_statement|floating_point | integer | assign | reference  | call | ident;
 	BNF source=extern_function|function;
 	source=(~((~source + &source) | ~source)).regist<Block>();
 	build::Builder builder;
 	//source(nodes).value()->codegen(builder);//ここ変えろ
 	source(nodes).transform([&builder](auto&& node) {
 		node->codegen(builder);
+		//std::error_code error_info;
+		//llvm::raw_fd_ostream raw_stream("out.ll", error_info,
+		//	llvm::sys::fs::OpenFlags::F_None);
+		//module->print(raw_stream, nullptr);
+		builder.getModule()->print(llvm::outs(), nullptr);
+		llvm::InitializeNativeTarget();
+		llvm::InitializeAllAsmPrinters();
+		llvm::InitializeAllAsmParsers();
+		LLVMLinkInMCJIT();
+		auto* func = builder.getModule()->getFunction("main");
+		llvm::ValueToValueMapTy vmap;
+		llvm::EngineBuilder engineBuilder(std::move(builder.getModule()));
+		llvm::ExecutionEngine* engine = engineBuilder.create();
+		//engine->runFunction(func, {});
+		llvm::outs() << engine->runFunction(func, {}).IntVal;
+		llvm::outs().flush();
 		return node;
 		});
-	//std::error_code error_info;
-	//llvm::raw_fd_ostream raw_stream("out.ll", error_info,
-	//	llvm::sys::fs::OpenFlags::F_None);
-	//module->print(raw_stream, nullptr);
-	builder.getModule()->print(llvm::outs(), nullptr);
-	llvm::InitializeNativeTarget();
-	llvm::InitializeAllAsmPrinters();
-	llvm::InitializeAllAsmParsers();
-	LLVMLinkInMCJIT();
-	auto* func = builder.getModule()->getFunction("main");
-	llvm::ValueToValueMapTy vmap;
-	llvm::EngineBuilder engineBuilder(std::move(builder.getModule()));
-	llvm::ExecutionEngine* engine = engineBuilder.create();
-	//engine->runFunction(func, {});
-	llvm::outs() << engine->runFunction(func, {}).IntVal;
-	llvm::outs().flush();
+
 	return EXIT_SUCCESS;
 }
