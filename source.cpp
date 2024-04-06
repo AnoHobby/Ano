@@ -366,21 +366,25 @@ public:
 		branch[IF]->codegen(builder);
 		builder.getBuilder().SetInsertPoint(elseBlock);
 		if (ELSE < branch.size())branch[ELSE]->codegen(builder);
+		auto needErase = true;
 		if (elseBlock->getInstList().back().getOpcode() != llvm::Instruction::Br) {
 			builder.getBuilder().CreateBr(after);
+			needErase= false;
 		}
 		if (ELSE < branch.size() && branch[ELSE]->equal<If>()) {
 			after->eraseFromParent();
 			after = builder.getBuilder().GetInsertBlock();
+			needErase = false;
 		}
 		if (ifBlock->getInstList().back().getOpcode() != llvm::Instruction::Br) {
 			builder.getBuilder().SetInsertPoint(ifBlock);
 			builder.getBuilder().CreateBr(after);
+			needErase = false;
 		}
-		builder.getBuilder().SetInsertPoint(after);
-		if (builder.getPhi().get("if") && after->getParent() && !after->getInstList().size()) {
+		if (needErase) {
 			after->eraseFromParent();
 		}
+		else builder.getBuilder().SetInsertPoint(after);
 		
 
 		return nullptr;//todo:’l‚ð•Ô‚·
