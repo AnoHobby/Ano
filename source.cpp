@@ -76,7 +76,7 @@ public:
 			NAMED_BLOCK_FLAG
 		};
 		builder.scope_nest();
-		if (NAMED_BLOCK_FLAG/*named block*/<branch.size()) {
+		if (NAMED_BLOCK_FLAG/*named block*/<branch.size()) {//ASTê∂ê¨éûì_Ç≈blockÇ∆namedblockÇãÊï ÇµÇƒÇ®Ç¢ÇΩï˚Ç™Ç¢Ç¢Ç©Ç‡ÇµÇÍÇ»Ç¢
 			builder.getPhi().init(
 				branch[NAME]->value,
 				llvm::BasicBlock::Create(builder.getBuilder().getContext(), branch[NAME]->value,//idea:â∫Ç©ÇÁàÍî‘ãﬂÇ¢Ç∆Ç±ÇÎÇfirstÇ∆ÇµÇƒégÇ§
@@ -279,7 +279,7 @@ public:
 		
 		builder.getBuilder().SetInsertPoint(builder.getPhi().get(Return::ret_ident).value().first);
 		builder.getBuilder().CreateRet(builder.getPhi().get(Return::ret_ident).value().second.size() ? builder.getPhi().create(builder.getBuilder(), Return::ret_ident) : nullptr);
-		builder.getModule()->print(llvm::outs(), nullptr);
+		//builder.getModule()->print(llvm::outs(), nullptr);
 
 		if (builder.getBuilder().GetInsertBlock()->getParent()->getReturnType()->isIntegerTy(0)) {
 			ret_type=builder.getPhi().get(Return::ret_ident).value().second.size() ?
@@ -378,7 +378,7 @@ public:
 			builder.getBuilder().CreateBr(after);
 		}
 		builder.getBuilder().SetInsertPoint(after);
-		if (after->getParent()&&!after->getInstList().size()) {
+		if (builder.getPhi().get("if") && after->getParent() && !after->getInstList().size()) {
 			after->eraseFromParent();
 		}
 		
@@ -465,8 +465,8 @@ int main() {
 	BNF if_statement = BNF("if") + BNF("(") + ~&expr + BNF(")") + ~&expr;
 	if_statement = ((if_statement + BNF("else")+ (~(&if_statement | &expr))) | if_statement).regist<If>();
 	//BNF if_expression = (if_statement + ~BNF(";")).regist<If>();//IfNodeÇ≈ï™äÚÇµÇ»ÇØÇÍÇŒÇ»ÇÁÇ»Ç¢
-	BNF if_expression = (~BNF("if") + BNF("(") + ~~&expr + BNF(")") + ~~&expr + BNF("else") + (~~if_statement|~~&expr) + BNF(";")).regist<Block>();
-	BNF statement = (~&expr + BNF(";"))| ~&expr;//expr+BNF(";")|expr
+	BNF if_expression = (~BNF("if") +~~( BNF("(") + ~&expr + BNF(")") + ~&expr + BNF("else") + (~if_statement | ~&expr)).regist<If>()).regist<Block>();
+	BNF statement =~if_statement| (~&expr + BNF(";"));//expr+BNF(";")|expr
 	BNF statements = (statement + &statements) | statement;
 	BNF block = ((BNF("{")|~ident+BNF("{")) + (~BNF("}") | (~statements + BNF("}")))).regist < Block >();
 	BNF type = ident;
@@ -479,7 +479,7 @@ int main() {
 	BNF variable_length = BNF(".") + BNF(".")+BNF(".");
 	BNF extern_argument = (~type + BNF(",") + &extern_argument) | ~type;
 	BNF extern_function = (BNF("extern") + ~type+~ident + BNF("(") + ((~variable_length + ~BNF(")")) |~BNF(")") | (~extern_argument + ((BNF(",")+~variable_length+BNF(")"))|BNF(")")))) + BNF(";")).regist<Extern>();//è„Ç∆ìØÇ∂
-	expr = let | block|ret |if_expression|if_statement|floating_point | integer | assign | reference  | call | ident;
+	expr = let | block|ret |if_expression|floating_point | integer | assign | reference  | call | ident;
 	BNF source=extern_function|function;
 	source=(~((~source + &source) | ~source)).regist<Block>();
 	build::Builder builder;
