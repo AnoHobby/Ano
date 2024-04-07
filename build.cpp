@@ -51,12 +51,21 @@ namespace build {
 		auto insert_or_assign(keyT&& key, valueT&& value) noexcept(false/*scope_nest<scopebreak*/) {
 			target.back().insert_or_assign(std::forward<keyT>(key), std::forward<valueT>(value));
 		}
-		std::optional<typename decltype(target)::value_type::mapped_type> get(const typename decltype(target)::value_type::key_type name) {
+		std::optional<typename decltype(target)::value_type::mapped_type> serch(const typename decltype(target)::value_type::key_type name) {
 			for (auto& scope : share::Reverse(target)) {
-				if (!scope.contains(name))continue;
-				return scope[name];
+				if (scope.contains(name))return scope[name];
 			}
 			return std::nullopt;
+		}
+		std::optional<std::size_t> serch_nest(const typename decltype(target)::value_type::key_type name) {
+			for (auto nest=target.size(); auto & scope : share::Reverse(target)) {
+				if (scope.contains(name))return nest;
+				++nest;
+			}
+			return std::nullopt;
+		}
+		auto get_nest() {
+			return target.size();
 		}
 	};
 	//export class Variables :public  Scope<llvm::Value*>{
@@ -76,13 +85,13 @@ namespace build {
 		}
 		template <class keyT>
 		auto push(keyT&& key, llvm::Value* first,llvm::BasicBlock* second) noexcept(false/*scope_nest<scopebreak*/) {
-			if (auto nodes = get(key);nodes) {//超絶非効率
+			if (auto nodes = serch(key);nodes) {//超絶非効率
 				nodes.value().second.emplace_back(std::make_pair(first, second));
 				Scope::insert_or_assign(std::forward<keyT>(key), nodes.value());
 			}
 		}
 		auto create(llvm::IRBuilder<>& builder, const std::string key) {
-			const auto nodes = get(key).value().second;
+			const auto nodes = serch(key).value().second;
 			llvm::PHINode* phiNode = builder.CreatePHI(nodes.front().first->getType(), nodes.size(), "");//型チェック必要あればする
 			for (const auto& [value, block] : nodes) {
 				phiNode->addIncoming(value, block);
