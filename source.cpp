@@ -90,9 +90,9 @@ public:
 		}
 		
 		if (NAMED_BLOCK_FLAG< branch.size()) {
-			builder.getBuilder().SetInsertPoint(builder.getPhi().serch(branch[NAME]->value).value().first);
-			//builder.getBuilder().CreateBr(builder.getPhi().serch(branch[NAME]->value).value().first);
-			if(builder.getPhi().serch(branch[NAME]->value).value().second.size())result = builder.getPhi().create(builder.getBuilder(), branch[NAME]->value);
+			builder.getBuilder().SetInsertPoint(builder.getPhi().search(branch[NAME]->value).value().first);
+			//builder.getBuilder().CreateBr(builder.getPhi().search(branch[NAME]->value).value().first);
+			if(builder.getPhi().search(branch[NAME]->value).value().second.size())result = builder.getPhi().create(builder.getBuilder(), branch[NAME]->value);
 			
 		}
 
@@ -103,12 +103,12 @@ public:
 class Load :public parser::Node {
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		if (builder.getVariables().serch(value).value()->getType()->isPointerTy())
+		if (builder.getVariables().search(value).value()->getType()->isPointerTy())
 			return builder.getBuilder().CreateLoad(
-				builder.getVariables().serch(value).value()->getType()->getNonOpaquePointerElementType(),
-				builder.getVariables().serch(value).value()
+				builder.getVariables().search(value).value()->getType()->getNonOpaquePointerElementType(),
+				builder.getVariables().search(value).value()
 			);
-		return builder.getVariables().serch(value).value();
+		return builder.getVariables().search(value).value();
 	}
 };
 class Let :public parser::Node {
@@ -118,7 +118,7 @@ class Let :public parser::Node {
 			VALUE
 		};
 		builder.getVariables().insert_or_assign(branch[NAME]->value, branch[VALUE]->codegen(builder));
-		//return builder.getVariables().serch(branch[NAME]->value).value();
+		//return builder.getVariables().search(branch[NAME]->value).value();
 		Load loader;
 		loader.value = branch[NAME]->value;
 		return loader.codegen(builder);//loadが不要な場面もある
@@ -136,7 +136,7 @@ class Mutable :public parser::Node {
 
 class Reference :public parser::Node {
 	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getVariables().serch(value).value();
+		return builder.getVariables().search(value).value();
 	}
 };
 class Assign :public parser::Node {
@@ -194,17 +194,17 @@ public:
 			CODE
 		};
 		llvm::Value* value;
-		if (branch.size() == 2&&branch.front()->value==ret_ident && branch.back()->equal<Load>() && builder.getPhi().serch(branch.back()->value)) {
+		if (branch.size() == 2&&branch.front()->value==ret_ident && branch.back()->equal<Load>() && builder.getPhi().search(branch.back()->value)) {
 			branch.erase(branch.begin());
 		}
 		if (CODE<branch.size())value = branch.back()->codegen(builder);
 		else {
-			builder.getBuilder().CreateBr(builder.getPhi().serch(branch[NAME]->value).value().first);
+			builder.getBuilder().CreateBr(builder.getPhi().search(branch[NAME]->value).value().first);
 			return nullptr;
 		}
 		if (value->getType()->isIntegerTy(0))return nullptr;
 		builder.getPhi().push(branch[NAME]->value,value,builder.getBuilder().GetInsertBlock());
-		builder.getBuilder().CreateBr(builder.getPhi().serch(branch[NAME]->value).value().first);
+		builder.getBuilder().CreateBr(builder.getPhi().search(branch[NAME]->value).value().first);
 		return value;
 	}
 };
@@ -275,20 +275,20 @@ public:
 					branch[ARGUMENTS]->branch[i]->branch[1]->value,
 					builder.getBuilder().CreateAlloca(arg.getType(), nullptr, "")
 				);
-				builder.getBuilder().CreateStore(&arg, builder.getVariables().serch(branch[ARGUMENTS]->branch[i]->branch[1]->value).value());
+				builder.getBuilder().CreateStore(&arg, builder.getVariables().search(branch[ARGUMENTS]->branch[i]->branch[1]->value).value());
 			}
 			++i;
 		}
 
 		branch[BLOCK]->codegen(builder);//block nodeの処理が終わるとret_identのスコープも切れるので、scope_nestをする
 		
-		builder.getBuilder().SetInsertPoint(builder.getPhi().serch(Return::ret_ident).value().first);
-		builder.getBuilder().CreateRet(builder.getPhi().serch(Return::ret_ident).value().second.size() ? builder.getPhi().create(builder.getBuilder(), Return::ret_ident) : nullptr);
+		builder.getBuilder().SetInsertPoint(builder.getPhi().search(Return::ret_ident).value().first);
+		builder.getBuilder().CreateRet(builder.getPhi().search(Return::ret_ident).value().second.size() ? builder.getPhi().create(builder.getBuilder(), Return::ret_ident) : nullptr);
 		builder.getModule()->print(llvm::outs(), nullptr);
 
 		if (builder.getBuilder().GetInsertBlock()->getParent()->getReturnType()->isIntegerTy(0)) {
-			ret_type=builder.getPhi().serch(Return::ret_ident).value().second.size() ?
-				builder.getPhi().serch(Return::ret_ident).value().second.front().first->getType() :
+			ret_type=builder.getPhi().search(Return::ret_ident).value().second.size() ?
+				builder.getPhi().search(Return::ret_ident).value().second.front().first->getType() :
 				builder.getBuilder().getVoidTy();
 			MyTypeMapper tm(ret_type);
 			llvm::ValueToValueMapTy vmap;
@@ -315,7 +315,7 @@ public:
 			);
 			builder.getModule()->getFunction(avoid_duplication_with_user_definition(branch[NAME]->value))->eraseFromParent();
 			if (tm.is_changed()){
-				ret_type = builder.getPhi().serch(Return::ret_ident).value().second.front().first->getType();
+				ret_type = builder.getPhi().search(Return::ret_ident).value().second.front().first->getType();
 				builder.getVariables().scope_break();
 				builder.scope_nest();
 				builder.getModule()->getFunction(branch[NAME]->value)->eraseFromParent();
@@ -388,7 +388,7 @@ public:
 			builder.getBuilder().CreateBr(after);
 			needErase = false;
 		}
-		if (needErase) {//forと同じやり方でafterを作成すると良い
+		if (needErase) {//search_nestとget_nestで同じスコープか見てafterを作成すると良い
 			after->eraseFromParent();
 		}
 		else builder.getBuilder().SetInsertPoint(after);
@@ -446,7 +446,7 @@ public:
 		const auto is_named_block = EXPRESSION_FLAG < branch.size();
 		if (is_named_block) {
 			
-			if (branch.front()->value == "void")after = builder.getPhi().serch("for").value().first;
+			if (branch.front()->value == "void")after = builder.getPhi().search("for").value().first;
 			else {
 				result=branch.front()->codegen(builder);
 			}
@@ -485,7 +485,7 @@ public:
 		builder.getBuilder().SetInsertPoint(after);
 		if (result) {
 			builder.getPhi().push("for",result,after);
-			builder.getBuilder().CreateBr(builder.getPhi().serch("for").value().first);
+			builder.getBuilder().CreateBr(builder.getPhi().search("for").value().first);
 		}
 		if(!is_named_block)builder.scope_break();
 		return nullptr;
@@ -544,9 +544,6 @@ int main() {
 	BNF if_statement = BNF("if") + BNF("(") + ~&expr + BNF(")") + ~&expr;
 	if_statement = ((if_statement + BNF("else")+ (~(&if_statement | &expr))) | if_statement).regist<If>();
 	BNF if_expression = (~BNF("if") +~~( BNF("(") + ~&expr + BNF(")") + ~&expr + BNF("else") + (~if_statement | ~&expr)).regist<If>()).regist<Block>();
-	//commaは式としてみなさない->引数としてfunction(a,b,(comma1,comma2),c)とすると可読性が低くなる
-	//上記のことがしたいならばblockを使う function(a,b,{comma1;comma2},c)
-	//BNF comma=(~((~&expr + BNF(",") + &comma) | ~&expr)).regist<Block>();//スコープの管理が面倒
 	BNF for_init=(~&expr + BNF(",") + &for_init) | ~&expr;
 	BNF for_content = ((~BNF(";") | ~for_init + BNF(";")) + (~BNF(";") | ~~&expr + BNF(";")) + (~BNF(")") | ~&expr + BNF(")")) + ~&expr).regist<For>();
 	BNF for_statement =(~BNF("for")+BNF("(")+ ~~( ~BNF("void")+((BNF(",") + for_content) | for_content))).regist<Block>() | BNF("for") + BNF("(") + for_content;
@@ -593,21 +590,3 @@ int main() {
 
 	return EXIT_SUCCESS;
 }
-
-/*早期リターンにしないと正しく動かない
-fn main(){
-let mut a=
-if(1i32){
-if(1i32){
-return if 2i32;
-}
-else{
-return if 4i32;
-}
-
-}else{
-return if 1i32;
-};
-return 0i32;
-}
-*/
