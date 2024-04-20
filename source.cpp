@@ -494,11 +494,12 @@ public:
 
 int main() {
 	enum class TAG {
-		IDENT,
-		DIGIT
+		DIGIT,
+		SNAKE_CASE
 	};
 	decltype(parser::Node::branch) nodes;
 	auto text = file::File("test.txt").read().value();
+	text.push_back('\n');
 	for (auto& c : text) {
 		auto node = std::make_unique<parser::Node>();
 		node.get()->value = std::string(1, c);
@@ -506,35 +507,34 @@ int main() {
 	}
 	using BNF = parser::BNF;
 	auto digit = BNF("0") | BNF("1") | BNF("2") | BNF("3") | BNF("4") | BNF("5") | BNF("6") | BNF("7") | BNF("8") | BNF("9");
-	auto alphabet =
-		BNF("a") | BNF("b") | BNF("c") | BNF("d") |
-		BNF("e") | BNF("f") | BNF("g") | BNF("h") |
-		BNF("i") | BNF("j") | BNF("k") | BNF("l") |
-		BNF("m") | BNF("n") | BNF("o") | BNF("p") |
-		BNF("q") | BNF("r") | BNF("s") | BNF("t") |
-		BNF("u") | BNF("v") | BNF("w") | BNF("x") |
-		BNF("y") | BNF("z") | BNF("A") | BNF("B") |
+	auto upper = BNF("A") | BNF("B") |
 		BNF("C") | BNF("D") | BNF("E") | BNF("F") |
 		BNF("G") | BNF("H") | BNF("I") | BNF("J") |
 		BNF("K") | BNF("L") | BNF("M") | BNF("N") |
 		BNF("O") | BNF("P") | BNF("Q") | BNF("R") |
 		BNF("S") | BNF("T") | BNF("U") | BNF("V") |
 		BNF("W") | BNF("X") | BNF("Y") | BNF("Z");
-	BNF ident_first = (alphabet | BNF("_"));
-	BNF ident_next = (ident_first | digit);
-	ident_next=(ident_next, &ident_next) | ident_next;
-	BNF ident = (ident_first, ident_next) | ident_first;
-	BNF symbol = BNF("{") | BNF("}") | BNF("(") | BNF(")") | BNF(";") | BNF(":")  | BNF(",") | BNF(".") | BNF("&")| BNF("=")  ;
+	auto lower =
+		BNF("a") | BNF("b") | BNF("c") | BNF("d") |
+		BNF("e") | BNF("f") | BNF("g") | BNF("h") |
+		BNF("i") | BNF("j") | BNF("k") | BNF("l") |
+		BNF("m") | BNF("n") | BNF("o") | BNF("p") |
+		BNF("q") | BNF("r") | BNF("s") | BNF("t") |
+		BNF("u") | BNF("v") | BNF("w") | BNF("x") |
+		BNF("y") | BNF("z");
+	BNF symbol = BNF("{") | BNF("}") | BNF("(") | BNF(")") | BNF(";") | BNF(":") | BNF(",") | BNF(".") | BNF("&") | BNF("=");
 	BNF number = (digit, &number) | digit;
-	BNF token = ~(ident.regist<Tag<TAG::IDENT>>() | symbol | number.regist<Tag<TAG::DIGIT>>()) | BNF(" ") | BNF("\n");
+	BNF snake_letter = (lower, number)|lower;
+	BNF snake_case = (snake_letter, ((BNF("_"), &snake_case) | &snake_case)) | snake_letter;//a1_32‚ð‹–‰Â‚·‚é‚©ŒŸ“¢
+	BNF until_return = BNF("\n") | (BNF().set<parser::Node>() + BNF("\n")) | (BNF().set<parser::Node>() + &until_return);
+	BNF until_comment = (BNF("*")+BNF("/")) | (BNF().set<parser::Node>() + BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + &until_comment);
+	BNF comment = BNF("/")+((BNF("/")+until_return)|(BNF("*")+until_comment));
+	BNF token = ~(snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>()) |comment| BNF(" ") | BNF("\n");
 	BNF tokens = (token + &tokens) | token;
 	nodes = std::move(tokens(nodes).value().get()->branch);
-	//for (const auto& node : source) {
-	//	std::cout << node->value << std::endl;
-	//}
-	ident = BNF().set<Tag<TAG::IDENT>>().regist<Load>();
+	auto ident = BNF().set<Tag<TAG::SNAKE_CASE>>().regist<Load>();
 	number = BNF().set<Tag<TAG::DIGIT>>();
-	BNF integer = (~number + ~ident).regist<Int>();
+	BNF integer = (~number + ~ident/*snake_letter for i32,i64 etc...*/).regist<Int>();
 	BNF floating_point = (~(number, BNF("."), number) + (BNF("f").regist<Float>() | BNF("d").regist<Double>()));
 	BNF expr;
 	BNF assign = (~ident.regist<Reference>() + BNF("=") + ~&expr).regist<Assign>();
