@@ -76,7 +76,7 @@ public:
 			NAMED_BLOCK_FLAG
 		};
 		builder.scope_nest();
-		if (NAMED_BLOCK_FLAG/*named block*/<branch.size()) {//AST生成時点でblockとnamedblockを区別しておいた方がいいかもしれない
+		if (NAMED_BLOCK_FLAG/*named block*/ < branch.size()) {//AST生成時点でblockとnamedblockを区別しておいた方がいいかもしれない
 			builder.getPhi().init(
 				branch[NAME]->value,
 				llvm::BasicBlock::Create(builder.getBuilder().getContext(), branch[NAME]->value,//idea:下から一番近いところをfirstとして使う
@@ -88,12 +88,12 @@ public:
 		for (const auto& child : branch.back()->branch) {
 			result = child.get()->codegen(builder);
 		}
-		
-		if (NAMED_BLOCK_FLAG< branch.size()) {
+
+		if (NAMED_BLOCK_FLAG < branch.size()) {
 			builder.getBuilder().SetInsertPoint(builder.getPhi().search(branch[NAME]->value).value().first);
 			//builder.getBuilder().CreateBr(builder.getPhi().search(branch[NAME]->value).value().first);
-			if(builder.getPhi().search(branch[NAME]->value).value().second.size())result = builder.getPhi().create(builder.getBuilder(), branch[NAME]->value);
-			
+			if (builder.getPhi().search(branch[NAME]->value).value().second.size())result = builder.getPhi().create(builder.getBuilder(), branch[NAME]->value);
+
 		}
 
 		builder.getVariables().scope_break();
@@ -194,16 +194,16 @@ public:
 			CODE
 		};
 		llvm::Value* value;
-		if (branch.size() == 2&&branch.front()->value==ret_ident && branch.back()->equal<Load>() && builder.getPhi().search(branch.back()->value)) {
+		if (branch.size() == 2 && branch.front()->value == ret_ident && branch.back()->equal<Load>() && builder.getPhi().search(branch.back()->value)) {
 			branch.erase(branch.begin());
 		}
-		if (CODE<branch.size())value = branch.back()->codegen(builder);
+		if (CODE < branch.size())value = branch.back()->codegen(builder);
 		else {
 			builder.getBuilder().CreateBr(builder.getPhi().search(branch[NAME]->value).value().first);
 			return nullptr;
 		}
 		if (value->getType()->isIntegerTy(0))return nullptr;
-		builder.getPhi().push(branch[NAME]->value,value,builder.getBuilder().GetInsertBlock());
+		builder.getPhi().push(branch[NAME]->value, value, builder.getBuilder().GetInsertBlock());
 		builder.getBuilder().CreateBr(builder.getPhi().search(branch[NAME]->value).value().first);
 		return value;
 	}
@@ -211,7 +211,7 @@ public:
 class MyTypeMapper : public llvm::ValueMapTypeRemapper {
 private:
 	llvm::Type* type;
-	bool changed=false;
+	bool changed = false;
 public:
 	MyTypeMapper(decltype(type) type) :type(type) {}
 	llvm::Type* remapType(llvm::Type* old) override {
@@ -221,7 +221,7 @@ public:
 		}
 		return old;
 	}
-	auto &is_changed()const noexcept{
+	auto& is_changed()const noexcept {
 		return changed;
 	}
 };
@@ -281,13 +281,13 @@ public:
 		}
 
 		branch[BLOCK]->codegen(builder);//block nodeの処理が終わるとret_identのスコープも切れるので、scope_nestをする
-		
+
 		builder.getBuilder().SetInsertPoint(builder.getPhi().search(Return::ret_ident).value().first);
 		builder.getBuilder().CreateRet(builder.getPhi().search(Return::ret_ident).value().second.size() ? builder.getPhi().create(builder.getBuilder(), Return::ret_ident) : nullptr);
 		builder.getModule()->print(llvm::outs(), nullptr);
 
 		if (builder.getBuilder().GetInsertBlock()->getParent()->getReturnType()->isIntegerTy(0)) {
-			ret_type=builder.getPhi().search(Return::ret_ident).value().second.size() ?
+			ret_type = builder.getPhi().search(Return::ret_ident).value().second.size() ?
 				builder.getPhi().search(Return::ret_ident).value().second.front().first->getType() :
 				builder.getBuilder().getVoidTy();
 			MyTypeMapper tm(ret_type);
@@ -314,7 +314,7 @@ public:
 				&tm
 			);
 			builder.getModule()->getFunction(avoid_duplication_with_user_definition(branch[NAME]->value))->eraseFromParent();
-			if (tm.is_changed()){
+			if (tm.is_changed()) {
 				ret_type = builder.getPhi().search(Return::ret_ident).value().second.front().first->getType();
 				builder.getVariables().scope_break();
 				builder.scope_nest();
@@ -376,7 +376,7 @@ public:
 		auto needErase = true;
 		if (elseBlock->getInstList().back().getOpcode() != llvm::Instruction::Br) {
 			builder.getBuilder().CreateBr(after);
-			needErase= false;
+			needErase = false;
 		}
 		if (ELSE < branch.size() && branch[ELSE]->equal<If>()) {
 			after->eraseFromParent();
@@ -392,7 +392,7 @@ public:
 			after->eraseFromParent();
 		}
 		else builder.getBuilder().SetInsertPoint(after);
-		
+
 
 		return nullptr;//todo:値を返す
 	}
@@ -438,30 +438,30 @@ public:
 		auto loop = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "comp", builder.getBuilder().GetInsertBlock()->getParent());
 		auto then = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "loop", builder.getBuilder().GetInsertBlock()->getParent());
 		auto update = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "updata", builder.getBuilder().GetInsertBlock()->getParent());
-		llvm::BasicBlock *after=nullptr;
-		llvm::Value* result=nullptr;
+		llvm::BasicBlock* after = nullptr;
+		llvm::Value* result = nullptr;
 		//idea:初期化構文が存在したらblockに変形する
-		
+
 		//idea:コンストラクタでnestを呼び出し、デストラクタでbreakを呼び出すクラスを作る
 		const auto is_named_block = EXPRESSION_FLAG < branch.size();
 		if (is_named_block) {
-			
+
 			if (branch.front()->value == "void")after = builder.getPhi().search("for").value().first;
 			else {
-				result=branch.front()->codegen(builder);
+				result = branch.front()->codegen(builder);
 			}
 			branch.erase(branch.begin());
 		}
 		else {
 			builder.scope_nest();
 		}
-		if(!after){
+		if (!after) {
 			after = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "after", builder.getBuilder().GetInsertBlock()->getParent());
 		}
 		for (auto& init : branch.front()->branch) {
 			init->codegen(builder);
 		}
-		
+
 		builder.getBuilder().CreateBr(loop);
 		builder.getBuilder().SetInsertPoint(loop);
 		if (branch[COND]->branch.size()) {
@@ -484,14 +484,50 @@ public:
 		builder.getBuilder().CreateBr(loop);
 		builder.getBuilder().SetInsertPoint(after);
 		if (result) {
-			builder.getPhi().push("for",result,after);
+			builder.getPhi().push("for", result, after);
 			builder.getBuilder().CreateBr(builder.getPhi().search("for").value().first);
 		}
-		if(!is_named_block)builder.scope_break();
+		if (!is_named_block)builder.scope_break();
 		return nullptr;
 	}
 };
 
+class Add :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return builder.getBuilder().CreateAdd(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+	}
+};
+class Sub :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return builder.getBuilder().CreateSub(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+	}
+};
+
+class Mul :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return builder.getBuilder().CreateMul(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+	}
+};
+class Div :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return builder.getBuilder().CreateSDiv(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+	}
+};
+class Rem :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return builder.getBuilder().CreateSRem(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+	}
+};
 int main() {
 	enum class TAG {
 		DIGIT,
@@ -522,49 +558,59 @@ int main() {
 		BNF("q") | BNF("r") | BNF("s") | BNF("t") |
 		BNF("u") | BNF("v") | BNF("w") | BNF("x") |
 		BNF("y") | BNF("z");
-	BNF symbol = BNF("{") | BNF("}") | BNF("(") | BNF(")") | BNF(";") | BNF(":") | BNF(",") | BNF(".") | BNF("&") | BNF("=");
+	BNF symbol =
+		BNF("{") | BNF("}") | BNF("(") | BNF(")") |
+		BNF(";") | BNF(":") | BNF(",") | BNF(".") |
+		BNF("&") | BNF("=") | BNF("+") | BNF("-") |
+		BNF("*") | BNF("/") | BNF("%");
 	BNF number = (digit, &number) | digit;
-	BNF snake_letter = (lower, number)|lower;
+	BNF snake_letter = (lower, number) | lower;
 	BNF snake_case = (snake_letter, ((BNF("_"), &snake_case) | &snake_case)) | snake_letter;//a1_32を許可するか検討
 	BNF until_return = BNF("\n") | (BNF().set<parser::Node>() + BNF("\n")) | (BNF().set<parser::Node>() + &until_return);
-	BNF until_comment = (BNF("*")+BNF("/")) | (BNF().set<parser::Node>() + BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + &until_comment);
-	BNF comment = BNF("/")+((BNF("/")+until_return)|(BNF("*")+until_comment));
-	BNF token = ~(snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>()) |comment| BNF(" ") | BNF("\n");
+	BNF until_comment = (BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + &until_comment);
+	BNF comment = BNF("/") + ((BNF("/") + until_return) | (BNF("*") + until_comment));
+	BNF token = ~(snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>()) | comment | BNF(" ") | BNF("\n");
 	BNF tokens = (token + &tokens) | token;
 	nodes = std::move(tokens(nodes).value().get()->branch);
 	auto ident = BNF().set<Tag<TAG::SNAKE_CASE>>().regist<Load>();
 	number = BNF().set<Tag<TAG::DIGIT>>();
+
 	BNF integer = (~number + ~ident/*snake_letter for i32,i64 etc...*/).regist<Int>();
 	BNF floating_point = (~(number, BNF("."), number) + (BNF("f").regist<Float>() | BNF("d").regist<Double>()));
 	BNF expr;
 	BNF assign = (~ident.regist<Reference>() + BNF("=") + ~&expr).regist<Assign>();
 	BNF let = (BNF("let") + ((BNF("mut") + ~ident + BNF("=") + ~(~&expr).regist<Mutable>()) | assign)).regist<Let>();
 	BNF reference = (BNF("&") + ident).regist<Reference>();
-	BNF ret = ((BNF("return")+~&expr/*ident*/ + ~&expr) |(~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();
+	BNF ret = ((BNF("return") + ~&expr/*ident*/ + ~&expr) | (~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();
 	BNF if_statement = BNF("if") + BNF("(") + ~&expr + BNF(")") + ~&expr;
-	if_statement = ((if_statement + BNF("else")+ (~(&if_statement | &expr))) | if_statement).regist<If>();
-	BNF if_expression = (~BNF("if") +~~( BNF("(") + ~&expr + BNF(")") + ~&expr + BNF("else") + (~if_statement | ~&expr)).regist<If>()).regist<Block>();
-	BNF for_init=(~&expr + BNF(",") + &for_init) | ~&expr;
+	if_statement = ((if_statement + BNF("else") + (~(&if_statement | &expr))) | if_statement).regist<If>();
+	BNF if_expression = (~BNF("if") + ~~(BNF("(") + ~&expr + BNF(")") + ~&expr + BNF("else") + (~if_statement | ~&expr)).regist<If>()).regist<Block>();
+	BNF for_init = (~&expr + BNF(",") + &for_init) | ~&expr;
 	BNF for_content = ((~BNF(";") | ~for_init + BNF(";")) + (~BNF(";") | ~~&expr + BNF(";")) + (~BNF(")") | ~&expr + BNF(")")) + ~&expr).regist<For>();
-	BNF for_statement =(~BNF("for")+BNF("(")+ ~~( ~BNF("void")+((BNF(",") + for_content) | for_content))).regist<Block>() | BNF("for") + BNF("(") + for_content;
-	BNF for_expression=(~BNF("for") + BNF("(") + ~~(~&expr + ((BNF(",") + for_content) | for_content))).regist<Block>();
+	BNF for_statement = (~BNF("for") + BNF("(") + ~~(~BNF("void") + ((BNF(",") + for_content) | for_content))).regist<Block>() | BNF("for") + BNF("(") + for_content;
+	BNF for_expression = (~BNF("for") + BNF("(") + ~~(~&expr + ((BNF(",") + for_content) | for_content))).regist<Block>();
 	//too bad:for(void,;) for(void 0i32;)->OKになるので改善しろ
-	BNF statement =~(if_statement|for_statement)| (~&expr + BNF(";"));//expr+BNF(";")|expr
+	BNF statement = ~(if_statement | for_statement) | (~&expr + BNF(";"));//expr+BNF(";")|expr
 	BNF statements = (statement + &statements) | statement;
-	BNF block = ((BNF("{")|~ident+BNF("{")) + (~BNF("}") | (~statements + BNF("}")))).regist < Block >();
+	BNF block = ((BNF("{") | ~ident + BNF("{")) + (~BNF("}") | (~statements + BNF("}")))).regist < Block >();
 	BNF type = ident;
 	BNF define_argument = ~(~type + ~ident);
-	define_argument= (define_argument + BNF(",") + &define_argument) | define_argument;
+	define_argument = (define_argument + BNF(",") + &define_argument) | define_argument;
 	BNF argument = (~&expr + BNF(",") + &argument) | ~&expr;
 	BNF call = (~ident + BNF("(") + ~(BNF(")") | argument + BNF(")"))).regist<Call>();
 
 	BNF function = (~((BNF("fn") + BNF(":") + type) | BNF("fn")) + ~ident + BNF("(") + ~(BNF(")") | (define_argument + BNF(")"))) + ~block).regist<Function>();
-	BNF variable_length = BNF(".") + BNF(".")+BNF(".");
+	BNF variable_length = BNF(".") + BNF(".") + BNF(".");
 	BNF extern_argument = (~type + BNF(",") + &extern_argument) | ~type;
-	BNF extern_function = (BNF("extern") + ~type+~ident + BNF("(") + ((~variable_length + ~BNF(")")) |~BNF(")") | (~extern_argument + ((BNF(",")+~variable_length+BNF(")"))|BNF(")")))) + BNF(";")).regist<Extern>();//上と同じ
-	expr = let | block|ret |if_expression|for_expression | assign | reference  | call |ident| floating_point | integer;
-	BNF source=extern_function|function;
-	source=(~((~source + &source) | ~source)).regist<Block>();
+	BNF extern_function = (BNF("extern") + ~type + ~ident + BNF("(") + ((~variable_length + ~BNF(")")) | ~BNF(")") | (~extern_argument + ((BNF(",") + ~variable_length + BNF(")")) | BNF(")")))) + BNF(";")).regist<Extern>();//上と同じ
+	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
+	expr = let | block | ret | if_expression | for_expression | assign | reference | call | primary|ident | floating_point | integer;
+	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Mul>() | (BNF("/") + ~&mul).regist<Div>() | (BNF("%") + ~&mul).regist<Rem>())) | expr;
+	expr = mul;
+	BNF add = (~expr + ((BNF("+") + ~&add).regist<Add>() | (BNF("-") + ~&add).regist<Sub>())) | expr;
+	expr = add;
+	BNF source = extern_function | function;
+	source = (~((~source + &source) | ~source)).regist<Block>();
 	build::Builder builder;
 	//source(nodes).value()->codegen(builder);//ここ変えろ
 	source(nodes).transform([&builder](auto&& node) {
