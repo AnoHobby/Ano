@@ -536,6 +536,15 @@ public:
 		return (builder.getBuilder().*I)(left, branch.back()->codegen(builder), "");
 	}
 };
+class String :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		value.pop_back();
+		value.erase(value.begin());
+		return builder.getBuilder().CreateGlobalStringPtr(value);
+	}
+};
 int main() {
 	enum class TAG {
 		DIGIT,
@@ -576,10 +585,13 @@ int main() {
 	BNF number = (digit, &number) | digit;
 	BNF snake_letter = (lower, number) | lower;
 	BNF snake_case = (snake_letter, ((BNF("_"), &snake_case) | &snake_case)) | snake_letter;//a1_32Çãñâ¬Ç∑ÇÈÇ©åüì¢
-	BNF until_return = BNF("\n") | (BNF().set<parser::Node>() + BNF("\n")) | (BNF().set<parser::Node>() + &until_return);
-	BNF until_comment = (BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + &until_comment);
+	BNF until_return = BNF("\n") | (BNF().set<parser::Node>() + ((BNF("\n"))| &until_return));
+	BNF until_comment = (BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + ((BNF("*") + BNF("/"))| &until_comment));
 	BNF comment = BNF("/") + ((BNF("/") + until_return) | (BNF("*") + until_comment));
-	BNF token = comment|~(snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>())  | BNF(" ") | BNF("\n");
+
+	BNF until_quote = BNF("\"") | (((BNF("\\"),BNF("\"")) | (BNF().set<parser::Node>())), (BNF("\"") | &until_quote));
+	BNF str = (BNF("\""), until_quote).regist<String>();
+	BNF token = comment|~(str|snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>())  | BNF(" ") | BNF("\n");
 	BNF tokens = (token + &tokens) | token;
 	nodes = std::move(tokens(nodes).value().get()->branch);
 	auto ident = BNF().set<Tag<TAG::SNAKE_CASE>>().regist<Load>();
@@ -614,7 +626,7 @@ int main() {
 	BNF extern_argument = (~type + BNF(",") + &extern_argument) | ~type;
 	BNF extern_function = (BNF("extern") + ~type + ~ident + BNF("(") + ((~variable_length + ~BNF(")")) | ~BNF(")") | (~extern_argument + ((BNF(",") + ~variable_length + BNF(")")) | BNF(")")))) + BNF(";")).regist<Extern>();//è„Ç∆ìØÇ∂
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
-	expr = let | block | ret | if_expression | for_expression | assign | reference | call | primary | ident | floating_point | integer;
+	expr = BNF().set<String>().regist<String>() | let | block | ret | if_expression | for_expression | assign | reference | call | primary | ident | floating_point | integer;
 	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateMul,false,false>>() | (BNF("/") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSDiv,false>>() | (BNF("%") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSRem>>())) | expr;
 	expr = mul;
 	BNF add = (~expr + ((BNF("+") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateAdd,false,false>>() | (BNF("-") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateSub,false,false>>())) | expr;
