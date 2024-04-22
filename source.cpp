@@ -579,7 +579,7 @@ int main() {
 	BNF until_return = BNF("\n") | (BNF().set<parser::Node>() + BNF("\n")) | (BNF().set<parser::Node>() + &until_return);
 	BNF until_comment = (BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + BNF("*") + BNF("/")) | (BNF().set<parser::Node>() + &until_comment);
 	BNF comment = BNF("/") + ((BNF("/") + until_return) | (BNF("*") + until_comment));
-	BNF token = ~(snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>()) | comment | BNF(" ") | BNF("\n");
+	BNF token = comment|~(snake_case.regist<Tag<TAG::SNAKE_CASE>>() | symbol | number.regist<Tag<TAG::DIGIT>>())  | BNF(" ") | BNF("\n");
 	BNF tokens = (token + &tokens) | token;
 	nodes = std::move(tokens(nodes).value().get()->branch);
 	auto ident = BNF().set<Tag<TAG::SNAKE_CASE>>().regist<Load>();
