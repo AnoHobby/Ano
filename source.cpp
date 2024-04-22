@@ -491,48 +491,43 @@ public:
 		return nullptr;
 	}
 };
-
-class Add :public parser::Node {
+template <auto Function>
+class Calculate:public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getBuilder().CreateAdd(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+		return (builder.getBuilder().*Function)(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
 	}
 };
-class Sub :public parser::Node {
+template <auto F,auto I>
+class Compare :public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getBuilder().CreateSub(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+		auto left = branch.front()->codegen(builder);
+		if (left->getType()->isFloatingPointTy())return (builder.getBuilder().*F)(left, branch.back()->codegen(builder), "",nullptr);
+		return (builder.getBuilder().*I)(left, branch.back()->codegen(builder), "");
 	}
 };
-
-class Mul :public parser::Node {
-private:
-public:
-	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getBuilder().CreateMul(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
-	}
-};
-class Div :public parser::Node {
-private:
-public:
-	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getBuilder().CreateSDiv(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
-	}
-};
-class Rem :public parser::Node {
-private:
-public:
-	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getBuilder().CreateSRem(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
-	}
-};
+//class A {
+//private:
+//public:
+//	auto b() {
+//		std::cout << "a" << std::endl;
+//	}
+//};
+//auto test(auto a,auto b) {
+//	(b->*a)();
+//}
 int main() {
+	//A e;
+	//test(&A::b,&e);
+
 	enum class TAG {
 		DIGIT,
 		SNAKE_CASE
 	};
+	build::Builder builder;
 	decltype(parser::Node::branch) nodes;
 	auto text = file::File("test.txt").read().value();
 	text.push_back('\n');
@@ -562,7 +557,8 @@ int main() {
 		BNF("{") | BNF("}") | BNF("(") | BNF(")") |
 		BNF(";") | BNF(":") | BNF(",") | BNF(".") |
 		BNF("&") | BNF("=") | BNF("+") | BNF("-") |
-		BNF("*") | BNF("/") | BNF("%");
+		BNF("*") | BNF("/") | BNF("%") | BNF("<") |
+		BNF(">");
 	BNF number = (digit, &number) | digit;
 	BNF snake_letter = (lower, number) | lower;
 	BNF snake_case = (snake_letter, ((BNF("_"), &snake_case) | &snake_case)) | snake_letter;//a1_32Çãñâ¬Ç∑ÇÈÇ©åüì¢
@@ -604,14 +600,26 @@ int main() {
 	BNF extern_argument = (~type + BNF(",") + &extern_argument) | ~type;
 	BNF extern_function = (BNF("extern") + ~type + ~ident + BNF("(") + ((~variable_length + ~BNF(")")) | ~BNF(")") | (~extern_argument + ((BNF(",") + ~variable_length + BNF(")")) | BNF(")")))) + BNF(";")).regist<Extern>();//è„Ç∆ìØÇ∂
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
-	expr = let | block | ret | if_expression | for_expression | assign | reference | call | primary|ident | floating_point | integer;
-	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Mul>() | (BNF("/") + ~&mul).regist<Div>() | (BNF("%") + ~&mul).regist<Rem>())) | expr;
+	expr = let | block | ret | if_expression | for_expression | assign | reference | call | primary | ident | floating_point | integer;
+	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateMul>>() | (BNF("/") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSDiv>>() | (BNF("%") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSRem>>())) | expr;
 	expr = mul;
-	BNF add = (~expr + ((BNF("+") + ~&add).regist<Add>() | (BNF("-") + ~&add).regist<Sub>())) | expr;
+	BNF add = (~expr + ((BNF("+") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateAdd>>() | (BNF("-") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateSub>>())) | expr;
 	expr = add;
+	//todo:(2 <= 3 <= 4)Çãñâ¬Ç∑ÇÈ
+	BNF compare = (
+		~expr +
+		(
+			(BNF("<") + BNF("=") + ~&compare).regist<Compare < &llvm::IRBuilder<>::CreateFCmpULE, &llvm::IRBuilder<>::CreateICmpULE >>() |
+			(BNF(">") + BNF("=") + ~&compare).regist<Compare < &llvm::IRBuilder<>::CreateFCmpUGE, &llvm::IRBuilder<>::CreateICmpUGE >>() |
+			(BNF("<") + ~&compare).regist < Compare < &llvm::IRBuilder<>::CreateFCmpULT, &llvm::IRBuilder<>::CreateICmpULT >>() |
+			(BNF(">") + ~&compare).regist<Compare < &llvm::IRBuilder<>::CreateFCmpUGT, &llvm::IRBuilder<>::CreateICmpUGT >>()
+		)
+	) | expr;
+
+	expr = compare;
 	BNF source = extern_function | function;
 	source = (~((~source + &source) | ~source)).regist<Block>();
-	build::Builder builder;
+
 	//source(nodes).value()->codegen(builder);//Ç±Ç±ïœÇ¶ÇÎ
 	source(nodes).transform([&builder](auto&& node) {
 		node->codegen(builder);
@@ -633,6 +641,8 @@ int main() {
 		llvm::outs().flush();
 		return node;
 		});
+	//;
+
 
 	return EXIT_SUCCESS;
 }
