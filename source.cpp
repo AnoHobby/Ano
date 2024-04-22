@@ -112,6 +112,8 @@ public:
 	}
 };
 class Let :public parser::Node {
+private:
+public:
 	llvm::Value* codegen(build::Builder& builder)override {
 		enum BRANCH {
 			NAME,
@@ -135,11 +137,15 @@ class Mutable :public parser::Node {
 };
 
 class Reference :public parser::Node {
+private:
+public:
 	llvm::Value* codegen(build::Builder& builder)override {
 		return builder.getVariables().search(value).value();
 	}
 };
 class Assign :public parser::Node {
+private:
+public:
 	llvm::Value* codegen(build::Builder& builder)override {
 		return builder.getBuilder().CreateStore(branch.back()->codegen(builder), branch.front()->codegen(builder)/*codegen()->to_pointer*/);
 	}
@@ -439,16 +445,31 @@ public:
 		auto then = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "loop", builder.getBuilder().GetInsertBlock()->getParent());
 		auto update = llvm::BasicBlock::Create(builder.getBuilder().getContext(), "updata", builder.getBuilder().GetInsertBlock()->getParent());
 		llvm::BasicBlock* after = nullptr;
-		llvm::Value* result = nullptr;
-		//idea:初期化構文が存在したらblockに変形する
-
-		//idea:コンストラクタでnestを呼び出し、デストラクタでbreakを呼び出すクラスを作る
+		//llvm::Value* result = nullptr;
+		std::string result;
 		const auto is_named_block = EXPRESSION_FLAG < branch.size();
 		if (is_named_block) {
 
 			if (branch.front()->value == "void")after = builder.getPhi().search("for").value().first;
 			else {
-				result = branch.front()->codegen(builder);
+				if (branch.front()->equal<Let>()) {
+					result = branch.front()->branch.front()->value;
+				}
+				else if (branch.front()->equal<Load>()) {
+					result = branch.front()->value;
+				}
+				if (result.empty()) {
+					result = avoid_duplication_with_user_definition("default");
+					Let let;
+					let.branch.emplace_back(std::make_unique<Node>());
+					let.branch.back()->value = result;
+					let.branch.emplace_back(std::move(branch.front()));
+					let.codegen(builder);
+
+				}
+				else {
+					branch.front()->codegen(builder);
+				}
 			}
 			branch.erase(branch.begin());
 		}
@@ -483,9 +504,15 @@ public:
 		branch[UPDATA]->codegen(builder);
 		builder.getBuilder().CreateBr(loop);
 		builder.getBuilder().SetInsertPoint(after);
-		if (result) {
-			builder.getPhi().push("for", result, after);
-			builder.getBuilder().CreateBr(builder.getPhi().search("for").value().first);
+		if (result.size()) {
+			Return return_for;
+			return_for.branch.emplace_back(std::make_unique<Node>());
+			return_for.branch.back()->value = "for";
+			return_for.branch.emplace_back(std::make_unique<Load>());
+			return_for.branch.back()->value = std::move(result);
+			return_for.codegen(builder);
+			/*builder.getPhi().push("for", result, after);
+			builder.getBuilder().CreateBr(builder.getPhi().search("for").value().first);*/
 		}
 		if (!is_named_block)builder.scope_break();
 		return nullptr;
