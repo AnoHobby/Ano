@@ -491,12 +491,12 @@ public:
 		return nullptr;
 	}
 };
-template <auto Function>
+template <auto Function,auto... Default_Args>
 class Calculate:public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		return (builder.getBuilder().*Function)(branch.front()->codegen(builder), branch.back()->codegen(builder), "");
+		return (builder.getBuilder().*Function)(branch.front()->codegen(builder), branch.back()->codegen(builder), "",Default_Args...);
 	}
 };
 template <auto F,auto I>
@@ -509,20 +509,7 @@ public:
 		return (builder.getBuilder().*I)(left, branch.back()->codegen(builder), "");
 	}
 };
-//class A {
-//private:
-//public:
-//	auto b() {
-//		std::cout << "a" << std::endl;
-//	}
-//};
-//auto test(auto a,auto b) {
-//	(b->*a)();
-//}
 int main() {
-	//A e;
-	//test(&A::b,&e);
-
 	enum class TAG {
 		DIGIT,
 		SNAKE_CASE
@@ -601,9 +588,9 @@ int main() {
 	BNF extern_function = (BNF("extern") + ~type + ~ident + BNF("(") + ((~variable_length + ~BNF(")")) | ~BNF(")") | (~extern_argument + ((BNF(",") + ~variable_length + BNF(")")) | BNF(")")))) + BNF(";")).regist<Extern>();//è„Ç∆ìØÇ∂
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
 	expr = let | block | ret | if_expression | for_expression | assign | reference | call | primary | ident | floating_point | integer;
-	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateMul>>() | (BNF("/") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSDiv>>() | (BNF("%") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSRem>>())) | expr;
+	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateMul,false,false>>() | (BNF("/") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSDiv,false>>() | (BNF("%") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSRem>>())) | expr;
 	expr = mul;
-	BNF add = (~expr + ((BNF("+") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateAdd>>() | (BNF("-") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateSub>>())) | expr;
+	BNF add = (~expr + ((BNF("+") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateAdd,false,false>>() | (BNF("-") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateSub,false,false>>())) | expr;
 	expr = add;
 	//todo:(2 <= 3 <= 4)Çãñâ¬Ç∑ÇÈ
 	BNF compare = (
