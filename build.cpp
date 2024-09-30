@@ -100,12 +100,42 @@ namespace build {
 			return phiNode;
 		}
 	};
+	export class Type_Analyzer {
+	private:
+		std::unordered_map<std::string, llvm::Type*> types;
+		std::function<std::optional<decltype(types)::mapped_type>(decltype(types)::key_type) > not_found_callback;
+		std::unordered_map<std::string, std::vector<std::string> > members;
+	public:
+		auto set_callback(decltype(not_found_callback) not_found_callback){
+			this->not_found_callback = not_found_callback;
+		}
+		auto emplace(auto&& type_name,auto&&type) {
+			types.emplace(type_name,type);
+		}
+		decltype(not_found_callback)::result_type analyze(decltype(types)::key_type type_name) {
+			if (types.contains(type_name))return types[type_name];
+			return not_found_callback(type_name);
+		}
+		auto add_member(std::string struct_name, std::string member) {
+			if (!members.contains(struct_name))members.emplace(struct_name,decltype(members)::mapped_type());
+			members[struct_name].push_back(member);
+		}
+		std::optional<std::size_t> search_offset(std::string struct_name,std::string searching_member) {
+			if (!members.contains(struct_name))return std::nullopt;
+			for (auto offset = 0; const auto & member:members[struct_name]) {
+				if (member == searching_member)return offset;
+				++offset;
+			}
+			return std::nullopt;
+		}
+	};
 	export class Builder {
 	private:
 		llvm::LLVMContext context;
 		std::unique_ptr<llvm::Module> mainModule;
 		llvm::IRBuilder<> builder;
 		Scope<llvm::Value*> variables;
+		Type_Analyzer type_analyzer;
 		PHI phi;
 	public:
 		Builder() :
@@ -126,6 +156,9 @@ namespace build {
 		auto& getPhi() {
 			return phi;
 		}
+		auto& getTypeAnalyzer() {
+			return type_analyzer;
+		}
 		auto scope_nest() {
 			variables.scope_nest();
 			phi.scope_nest();
@@ -134,26 +167,6 @@ namespace build {
 			variables.scope_break();//todo:Interface‚Æ‚µ‚Äfor•¶‰ñ‚·
 			phi.scope_break();
 		}
-		std::optional<llvm::Type*> string_to_type(const std::string type) {
-			switch (type.front()) {
-			case 'v':
-				return builder.getVoidTy();
-				break;
-			case 'd':
-				return builder.getDoubleTy();
-				break;
-			case 'f':
-				return builder.getFloatTy();
-				break;
-			case 'u':
-			case 'i':
-				return builder.getIntNTy(
-					std::stoi(type.substr(1))
-				);
-				break;
-
-			}
-			return std::nullopt;
-		}
+		
 	};
 }
