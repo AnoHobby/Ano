@@ -4,6 +4,7 @@
 #include "file.cpp"
 #include "parser.cpp"
 #include <string>
+#include <algorithm>
 #include <functional>
 #include <vector>
 #include <iostream>
@@ -30,6 +31,7 @@
 import parser;
 import file;
 import <string>;
+import <algorithm>;
 import <functional>;
 import <vector>;
 import <iostream>;
@@ -100,15 +102,24 @@ public:
 		return result;
 	}
 };
+class Reference :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		return builder.getVariables().search(value).value();
+	}
+};
+
 class Load :public parser::Node {
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		if (builder.getVariables().search(value).value()->getType()->isPointerTy())
+		const auto value = branch.front()->codegen(builder);
+		if (value->getType()->isPointerTy())
 			return builder.getBuilder().CreateLoad(
-				builder.getVariables().search(value).value()->getType()->getNonOpaquePointerElementType(),
-				builder.getVariables().search(value).value()
+				value->getType()->getNonOpaquePointerElementType(),
+				value
 			);
-		return builder.getVariables().search(value).value();
+		return value;
 	}
 };
 
@@ -123,7 +134,8 @@ public:
 		builder.getVariables().insert_or_assign(branch[NAME]->value, branch[VALUE]->codegen(builder));
 		//return builder.getVariables().search(branch[NAME]->value).value();
 		Load loader;
-		loader.value = branch[NAME]->value;
+		loader.branch.emplace_back(std::make_unique<Reference>());
+		loader.branch.front()->value = std::move(branch[NAME]->value);
 		return loader.codegen(builder);//loadが不要な場面もある
 	}
 };
@@ -134,14 +146,6 @@ class Mutable :public parser::Node {
 		auto* variable = builder.getBuilder().CreateAlloca(value->getType());
 		builder.getBuilder().CreateStore(value, variable);
 		return variable;
-	}
-};
-
-class Reference :public parser::Node {
-private:
-public:
-	llvm::Value* codegen(build::Builder& builder)override {
-		return builder.getVariables().search(value).value();
 	}
 };
 class Assign :public parser::Node {
@@ -233,11 +237,21 @@ public:
 			NAME,
 			ARGUMENTS,
 		};
+		branch[NAME]->codegen(builder);
 		std::vector<llvm::Type*> args(branch[ARGUMENTS]->branch.size());
 		for (auto i = 0; auto & arg : args) {
-			arg = builder.getTypeAnalyzer().analyze(branch[ARGUMENTS]->branch[i]->branch.front()->value).value();
+			arg = builder.getTypeAnalyzer().analyze(branch[ARGUMENTS]->branch[i]->branch.front()->value).value()->getPointerTo();
 			++i;
 		}
+		if (builder.getTypeAnalyzer().analyze(builder.get_namespace().get_path())) {
+			//argsは最後の方が効率がいいかも
+			args.insert(args.begin(), builder.getTypeAnalyzer().analyze(builder.get_namespace().get_path()).value()->getPointerTo());
+			branch[ARGUMENTS]->branch.emplace(branch[ARGUMENTS]->branch.begin(), std::make_unique<Node>());
+			branch[ARGUMENTS]->branch.front()->branch.resize(1);//dummy
+			branch[ARGUMENTS]->branch.front()->branch.emplace_back(std::make_unique<Node>());
+			branch[ARGUMENTS]->branch.front()->branch.back()->value = "this";
+		}
+
 		if (!ret_type) {
 			ret_type =llvm::Type::getIntNTy(builder.getBuilder().getContext(), 0);
 		}
@@ -336,10 +350,18 @@ public:
 			NAME,
 			ARGUMENTS
 		};
+		//branch[NAME]->codegen(builder);
 		std::vector<llvm::Value*> args(branch[ARGUMENTS]->branch.size());
 		for (auto i = 0; auto & arg:args) {
 			arg = branch[ARGUMENTS]->branch[i]->codegen(builder);
 			++i;
+		}
+		constexpr decltype(branch[NAME]->value) constructor = "::new";//uncool
+		if (constructor.size() < branch[NAME]->value.size() && std::equal(branch[NAME]->value.end() - constructor.size(), branch[NAME]->value.end(), constructor.begin(), constructor.end())) {
+			args.insert(
+				args.begin(),
+				builder.getBuilder().CreateAlloca(builder.getTypeAnalyzer().analyze(std::move(branch[NAME]->value.substr(0, branch[NAME]->value.size() - constructor.size()))).value())
+			);
 		}
 		//ret_ident型を返す関数を新しく作る
 		if (!builder.getModule()->getFunction(branch[NAME]->value))return builder.getBuilder().CreateCall(builder.getModule()->getFunction(avoid_duplication_with_user_definition(branch[NAME]->value)), args);;
@@ -500,7 +522,8 @@ public:
 			return_for.branch.emplace_back(std::make_unique<Node>());
 			return_for.branch.back()->value = "for";
 			return_for.branch.emplace_back(std::make_unique<Load>());
-			return_for.branch.back()->value = std::move(result);
+			return_for.branch.back()->branch.emplace_back(std::make_unique<Reference>());
+			return_for.branch.back()->branch.back()->value = std::move(result);
 			return_for.codegen(builder);
 			/*builder.getPhi().push("for", result, after);
 			builder.getBuilder().CreateBr(builder.getPhi().search("for").value().first);*/
@@ -544,7 +567,7 @@ public:
 			if(branch.front()->equal<std::remove_reference_t<decltype(*this)>>())return llvm::ArrayType::get(self(branch.front()->branch),branch.size());
 			return branch.front()->codegen(builder)->getType();
 			}(branch),branch.size()));
-		builder.getModule()->print(llvm::outs(), nullptr);
+		//builder.getModule()->print(llvm::outs(), nullptr);
 		/*auto array_type = array_value->getType()->getNonOpaquePointerElementType();
 		for (auto index=0; const auto & value : branch) {
 			array_value = builder.getBuilder().CreateGEP(
@@ -636,9 +659,12 @@ private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
 		const auto class_value = branch.front()->codegen(builder);
-		const auto offset = builder.getTypeAnalyzer().search_offset(class_value->getType()->getStructName().str(), branch.back()->value);
+		const auto offset = builder.getTypeAnalyzer().search_offset(class_value->getType()->getNonOpaquePointerElementType()->getStructName().str(), branch.back()->value);
 		if (offset) {//a.b.cのような奴はまだ無理
-			return builder.getBuilder().CreateStructGEP(class_value->getType(), class_value, offset.value());
+			return builder.getBuilder().CreateStructGEP(class_value->getType()->getNonOpaquePointerElementType(), class_value, offset.value());
+		}
+		for(auto & member : branch) {
+
 		}
 		return nullptr;
 	}
@@ -647,15 +673,82 @@ class Class :public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		auto *struct_type=llvm::StructType::create(builder.getBuilder().getContext(),std::move(branch.front()->value));
-		struct_type->setBody({},false);
-		builder.getTypeAnalyzer().emplace(struct_type->getName().str(),struct_type);
-
-		branch.back()->codegen(builder);
-		struct_type->setBody({builder.getBuilder().getFloatTy()},false);//大事!
+		auto* struct_type = llvm::StructType::create(builder.getBuilder().getContext(), std::move(branch.front()->value));
+		struct_type->setBody({}, false);
+		builder.getTypeAnalyzer().emplace(struct_type->getName().str(), struct_type);
+		builder.get_namespace().nest(struct_type->getName().str());
+		for (auto& function : branch.back()->branch) {
+			function->codegen(builder);
+		}
+		builder.get_namespace().break_path();
 		return nullptr;
 	}
 };
+class Var_This :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		auto* value = branch.front()->branch.back()->codegen(builder);
+		const auto struct_type = static_cast<llvm::StructType*>(builder.getVariables().search("this").value()->getType()->getNonOpaquePointerElementType());
+		builder.getTypeAnalyzer().add_member(
+			struct_type->getStructName().str(),
+			branch.front()->branch.front()->branch.back()->value
+		);
+		
+		std::vector<llvm::Type*> types(struct_type->getStructNumElements());
+		for (auto offset=0; auto & type : types) {
+			type = struct_type->getElementType(offset);
+			++offset;
+		}
+		types.push_back(value->getType());
+		struct_type->setBody(types,false);
+		branch.front()->codegen(builder);
+		//todo:thisを定数にしよう
+		//namespaceを管理しているクラスからgetした方が早い
+
+		return nullptr;
+	}
+};
+class Namespace :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		value = builder.get_namespace().concat(std::move(value));//相対パスとかも
+		return nullptr;
+	}
+};
+class Debug :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		auto class_value = branch.front()->codegen(builder);
+		for (auto& member : branch.back()->branch) {
+			if (member->equal<Load>()) {
+				class_value=
+					builder
+					.getBuilder()
+					.CreateStructGEP(
+						class_value->getType()->getNonOpaquePointerElementType(),
+						class_value,
+						builder
+						.getTypeAnalyzer()
+						.search_offset(
+							class_value->getType()->getNonOpaquePointerElementType()->getStructName().str(),
+							member->branch.front()->value
+						).value()
+					);
+				continue;
+			}
+			if (class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
+				member->branch.front()->value.insert(0,class_value->getType()->getNonOpaquePointerElementType()->getStructName().str()+"::");
+			}
+			class_value=member->codegen(builder);
+
+		}
+		return class_value;
+	}
+};
+
 int main() {
 	enum class TAG {
 		DIGIT,
@@ -712,7 +805,7 @@ int main() {
 		BNF(";") | BNF(":") | BNF(",") | BNF(".") |
 		BNF("&") | BNF("=") | BNF("+") | BNF("-") |
 		BNF("*") | BNF("/") | BNF("%") | BNF("<") |
-		BNF(">");
+		BNF(">")|BNF("'");
 	BNF number = (digit, &number) | digit;
 	
 	BNF snake_letter = (lower, number) | lower;
@@ -743,31 +836,49 @@ int main() {
 		|BNF(" ") |BNF("\n");
 	BNF tokens = (token + &tokens) | token;
 	nodes = std::move(tokens(nodes).value().get()->branch);
-	for (const auto& node : nodes) {
-		std::cout << node->value << std::endl;
-	}
-	auto ident = BNF().set<Tag<TAG::SNAKE_CASE>>().regist<Load>();
-	auto constant = BNF().set<Tag<TAG::UPPER_SNAKE_CASE>>().regist<Load>();
+	//for (const auto& node : nodes) {
+	//	std::cout << node->value << std::endl;
+	//}
+	//codegen内部で文字列をnamespaceに応じて変更し、それを使う
+	auto ident = BNF().set<Tag<TAG::SNAKE_CASE>>();
+	auto constant = BNF().set<Tag<TAG::UPPER_SNAKE_CASE>>();
 	BNF class_name = BNF().set<Tag<TAG::SNAKE_CAMEL_CASE>>() | upper;
+	BNF scope = (class_name, BNF(":"), BNF(":"), &scope).regist<Namespace>() | ident;
 	number = BNF().set<Tag<TAG::DIGIT>>();
 
 	BNF integer = (~number + ~ident/*snake_letter for i32,i64 etc...*/).regist<Int>();
 	BNF floating_point = (~(number, BNF("."), number) + (BNF("f").regist<Floating_Point<&llvm::Type::getFloatTy>>() | BNF("d").regist<Floating_Point<&llvm::Type::getDoubleTy>>()));
 	BNF expr;
 
-	
-	BNF access_class_nest = ~ident + BNF(".") + &access_class_nest | ~ident;
-	BNF access_class = ((~ident+BNF(".")+access_class_nest)).regist<Access_Class>();
+	//エラー出たらここ見る
+	//a.b.c
+	//a.b.c()
+	//a().b.c
+	BNF access_class_nest = ~ident.regist<Reference>() + BNF(".") + &access_class_nest | ~ident.regist<Reference>();
+	BNF access_class = ((~ident.regist<Reference>() + BNF(".") + access_class_nest)).regist<Access_Class>();
+
 	//BNF lvalue;
 	BNF reference = (BNF("&") + ident).regist<Reference>();
 
 	BNF assign = (~(access_class|ident.regist<Reference>()) + BNF("=") + ~&expr).regist<Assign>();
+	//BNF var = (BNF("var") +
+	//	(
+	//		(~ident + BNF("=") + ~(~&expr).regist<Mutable>()) |
+	//		(~constant + BNF("=") + ~&expr)
+	//		)
+	//	).regist<Var>();
+
 	BNF var = (BNF("var") +
 		(
-			(~ident + BNF("=") + ~(~&expr).regist<Mutable>()) |
-			(~constant + BNF("=") + ~&expr)
+			(~(~access_class + BNF("=") + ~&expr).regist<Assign>()).regist<Var_This>() |
+			(
+				(
+					(~ident + BNF("=") + ~(~&expr).regist<Mutable>()) |
+					(~constant + BNF("=") + ~&expr)
+					)
+				).regist<Var>()
 			)
-		).regist<Var>();
+		);
 
 	BNF ret = ((BNF("return") + ~&expr/*ident*/ + ~&expr) | (~BNF("return") + ~&expr) | ~BNF("return")).regist<Return>();
 	
@@ -796,13 +907,17 @@ int main() {
 	BNF define_argument = ~(~type + ~ident);
 	define_argument = (define_argument + BNF(",") + &define_argument) | define_argument;
 	BNF argument = (~&expr + BNF(",") + &argument) | ~&expr;
-	BNF call = (~ident + BNF("(") + ~(BNF(")") | argument + BNF(")"))).regist<Call>();
+	BNF call = (~scope + BNF("(") + ~(BNF(")") | argument + BNF(")"))).regist<Call>();
+	
+
 	
 	BNF type_specifier = BNF("-") + BNF(">") + ~type;
-	BNF function = (BNF("fn") + ~(type) + BNF("(") + ~(BNF(")") | (define_argument + BNF(")")))+(~block)).regist<Function>();
+	BNF function = (BNF("fn") + ~(ident.regist<Namespace>()) + BNF("(") + ~(BNF(")") | (define_argument + BNF(")")))+(~block)).regist<Function>();
 	
 	//define_class = (~define_class + &define_class) | ~define_class;
-	BNF cls = (BNF("class") + ~class_name + BNF("{")+~function+ BNF("}")).regist<Class>();
+	BNF class_content = ~function;
+	class_content = (class_content + &class_content) | class_content;
+	BNF cls = (BNF("class") + ~class_name + BNF("{")+~class_content+ BNF("}")).regist<Class>();
 
 
 	BNF variable_length = BNF(".") + BNF(".") + BNF(".");
@@ -811,7 +926,7 @@ int main() {
 	
 	
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
-	expr = BNF().set<String>().regist<String>() | var | ret |static_array|block  | if_expression | for_expression | assign | reference | call | primary |access_class |ident|constant| floating_point | integer;
+	expr = BNF().set<String>().regist<String>() | var | ret |static_array|block  | if_expression | for_expression | assign | reference | call | primary |(~access_class).regist<Load>() | (~ident.regist<Reference>()).regist<Load>() | (~constant.regist<Reference>()).regist<Load>() | floating_point | integer;
 	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateMul,false,false>>() | (BNF("/") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSDiv,false>>() | (BNF("%") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSRem>>())) | expr;
 	expr = mul;
 	BNF add = (~expr + ((BNF("+") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateAdd,false,false>>() | (BNF("-") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateSub,false,false>>())) | expr;
@@ -835,6 +950,11 @@ int main() {
 	//[[0i32]][0i32][0i32]をexpr([0i32]access([0i32]))access([0i32])と解釈した方が綺麗
 	expr = access_array;
 
+	BNF nest = (~expr + BNF("'") + &nest).regist<Debug>() | ~expr;//Loaderつけたらいいかも
+	BNF test = (((~ident.regist<Reference>()+BNF("'")) | (~expr + BNF("'"))) + ~nest).regist<Debug>() | expr;
+	expr = test;
+
+
 	BNF source = (extern_function | function|cls);
 	source = ((~source + &source) | ~source);
 	BNF source_wrapper = (~source).regist<Block>();
@@ -842,11 +962,12 @@ int main() {
 	//source(nodes).value()->codegen(builder);//ここ変えろ
 	source_wrapper(nodes).transform([&builder](auto&& node) {
 		node->codegen(builder);
+		builder.getModule()->print(llvm::outs(), nullptr);
 		//std::error_code error_info;
 		//llvm::raw_fd_ostream raw_stream("out.ll", error_info,
 		//	llvm::sys::fs::OpenFlags::F_None);
 		//module->print(raw_stream, nullptr);
-		builder.getModule()->print(llvm::outs(), nullptr);
+		//builder.getModule()->print(llvm::outs(), nullptr);
 		llvm::InitializeNativeTarget();
 		llvm::InitializeAllAsmPrinters();
 		llvm::InitializeAllAsmParsers();
@@ -856,12 +977,12 @@ int main() {
 		llvm::EngineBuilder engineBuilder(std::move(builder.getModule()));
 		llvm::ExecutionEngine* engine = engineBuilder.create();
 		//engine->runFunction(func, {});
+		
 		llvm::outs() << engine->runFunction(func, {}).IntVal;
 		llvm::outs().flush();
 		return node;
 		});
 	//;
-
 
 	return EXIT_SUCCESS;
 }

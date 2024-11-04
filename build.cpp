@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
@@ -17,6 +18,7 @@ export module build;
 import <unordered_map>;
 import <memory>;
 import <optional>;
+import <string_view>;
 import "llvm/IR/LLVMContext.h";
 import "llvm/IR/Module.h";
 import "llvm/IR/Function.h";
@@ -29,6 +31,34 @@ import "llvm/Support/TargetSelect.h";
 #endif
 #include "share.cpp"
 namespace build {
+	class Namespace {//"::"‚ð’ŠÛ‰»
+	private:
+		static constexpr std::string_view separator = "::";
+		std::string path;
+	public:
+		auto nest(decltype(path) &&path) {
+			if (!this->path.empty())this->path+=separator;
+			this->path += path;
+		}
+		auto break_path() {
+			const auto break_path_start=path.find_last_of(separator);
+			if (break_path_start == std::string::npos) {
+				path.clear();
+				return;
+			}
+			path.resize(break_path_start-1);
+			return;
+		}
+		auto concat(std::string&& target){
+			nest(std::move(target));
+			const auto target_path = path;
+			break_path();
+			return target_path;
+		}
+		const auto& get_path()const {
+			return path;
+		}
+	};
 	export class Scope_Interface {
 	private:
 	public:
@@ -137,6 +167,7 @@ namespace build {
 		Scope<llvm::Value*> variables;
 		Type_Analyzer type_analyzer;
 		PHI phi;
+		Namespace ns;
 	public:
 		Builder() :
 			mainModule(std::make_unique<decltype(mainModule)::element_type>("module", context)),
@@ -166,6 +197,9 @@ namespace build {
 		auto scope_break() {
 			variables.scope_break();//todo:Interface‚Æ‚µ‚Äfor•¶‰ñ‚·
 			phi.scope_break();
+		}
+		auto& get_namespace(){
+			return ns;
 		}
 		
 	};
