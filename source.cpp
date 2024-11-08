@@ -738,13 +738,25 @@ public:
 					);
 				continue;
 			}
-			if (class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
-				member->branch.front()->value.insert(0,class_value->getType()->getNonOpaquePointerElementType()->getStructName().str()+"::");
+			builder.getVariables().scope_nest();
+			if (class_value->getType()->isPointerTy() && class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
+				//builder.getModule()->getFunction(member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::"))
+				member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::");
 			}
-			else {
-
+			else{
+				//0i32.call()のようなものはASTの再構築ではなく、内部で変数を使って対応
+				//todo_idea:Scope_Nest(&builder)->コンストラクタでnest,デストラクタでbreak
+				const auto RECEIVER = std::move(avoid_duplication_with_user_definition("receiver"));
+				builder.getVariables().insert_or_assign(
+					RECEIVER,
+					class_value
+				);
+				member->branch.back()->branch.emplace(member->branch.back()->branch.begin(),std::make_unique<Load/*referenceでも...?*/>());
+				member->branch.back()->branch.front()->branch.emplace(member->branch.back()->branch.front()->branch.begin(),std::make_unique<Reference>());
+				member->branch.back()->branch.front()->branch.front()->value = RECEIVER;
 			}
 			class_value=member->codegen(builder);
+			builder.getVariables().scope_break();
 
 		}
 		return class_value;
