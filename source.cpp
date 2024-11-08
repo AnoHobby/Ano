@@ -240,7 +240,7 @@ public:
 		branch[NAME]->codegen(builder);
 		std::vector<llvm::Type*> args(branch[ARGUMENTS]->branch.size());
 		for (auto i = 0; auto & arg : args) {
-			arg = builder.getTypeAnalyzer().analyze(branch[ARGUMENTS]->branch[i]->branch.front()->value).value()->getPointerTo();
+			arg = builder.getTypeAnalyzer().analyze(branch[ARGUMENTS]->branch[i]->branch.front()->value).value();
 			++i;
 		}
 		if (builder.getTypeAnalyzer().analyze(builder.get_namespace().get_path())) {
@@ -692,7 +692,8 @@ public:
 		const auto struct_type = static_cast<llvm::StructType*>(builder.getVariables().search("this").value()->getType()->getNonOpaquePointerElementType());
 		builder.getTypeAnalyzer().add_member(
 			struct_type->getStructName().str(),
-			branch.front()->branch.front()->branch.back()->value
+			branch.front()->branch.front()->branch.back()->branch.front()->branch.front()->value
+
 		);
 		
 		std::vector<llvm::Type*> types(struct_type->getStructNumElements());
@@ -702,11 +703,9 @@ public:
 		}
 		types.push_back(value->getType());
 		struct_type->setBody(types,false);
-		branch.front()->codegen(builder);
+		return branch.front()->codegen(builder);
 		//todo:thisを定数にしよう
 		//namespaceを管理しているクラスからgetした方が早い
-
-		return nullptr;
 	}
 };
 class Namespace :public parser::Node {
@@ -741,6 +740,9 @@ public:
 			}
 			if (class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
 				member->branch.front()->value.insert(0,class_value->getType()->getNonOpaquePointerElementType()->getStructName().str()+"::");
+			}
+			else {
+
 			}
 			class_value=member->codegen(builder);
 
@@ -850,27 +852,13 @@ int main() {
 	BNF floating_point = (~(number, BNF("."), number) + (BNF("f").regist<Floating_Point<&llvm::Type::getFloatTy>>() | BNF("d").regist<Floating_Point<&llvm::Type::getDoubleTy>>()));
 	BNF expr;
 
-	//エラー出たらここ見る
-	//a.b.c
-	//a.b.c()
-	//a().b.c
-	BNF access_class_nest = ~ident.regist<Reference>() + BNF(".") + &access_class_nest | ~ident.regist<Reference>();
-	BNF access_class = ((~ident.regist<Reference>() + BNF(".") + access_class_nest)).regist<Access_Class>();
-
+	BNF access_class;
 	//BNF lvalue;
 	BNF reference = (BNF("&") + ident).regist<Reference>();
 
-	BNF assign = (~(access_class|ident.regist<Reference>()) + BNF("=") + ~&expr).regist<Assign>();
-	//BNF var = (BNF("var") +
-	//	(
-	//		(~ident + BNF("=") + ~(~&expr).regist<Mutable>()) |
-	//		(~constant + BNF("=") + ~&expr)
-	//		)
-	//	).regist<Var>();
-
 	BNF var = (BNF("var") +
 		(
-			(~(~access_class + BNF("=") + ~&expr).regist<Assign>()).regist<Var_This>() |
+			(~(~&access_class + BNF("=") + ~&expr).regist<Assign>()).regist<Var_This>() |
 			(
 				(
 					(~ident + BNF("=") + ~(~&expr).regist<Mutable>()) |
@@ -926,7 +914,16 @@ int main() {
 	
 	
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
-	expr = BNF().set<String>().regist<String>() | var | ret |static_array|block  | if_expression | for_expression | assign | reference | call | primary |(~access_class).regist<Load>() | (~ident.regist<Reference>()).regist<Load>() | (~constant.regist<Reference>()).regist<Load>() | floating_point | integer;
+	expr = BNF().set<String>().regist<String>() | var | ret |static_array|block  | if_expression | for_expression  | reference | call | primary  | (~ident.regist<Reference>()).regist<Load>() | (~constant.regist<Reference>()).regist<Load>() | floating_point | integer;
+	
+	BNF access_class_nest = (~expr + BNF(".") + &access_class_nest).regist<Debug>() | ~expr;//Loaderつけたらいいかも
+	access_class = (((~ident.regist<Reference>() + BNF(".")) | (~expr + BNF("."))) + ~access_class_nest).regist<Debug>();
+	expr = (~access_class).regist<Load>() | expr;
+
+	BNF assign = (~(&access_class | ident.regist<Reference>()) + BNF("=") + ~&expr).regist<Assign>();//callもいる
+	expr = assign | expr;
+
+	
 	BNF mul = (~expr + ((BNF("*") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateMul,false,false>>() | (BNF("/") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSDiv,false>>() | (BNF("%") + ~&mul).regist<Calculate<&llvm::IRBuilder<>::CreateSRem>>())) | expr;
 	expr = mul;
 	BNF add = (~expr + ((BNF("+") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateAdd,false,false>>() | (BNF("-") + ~&add).regist<Calculate<&llvm::IRBuilder<>::CreateSub,false,false>>())) | expr;
@@ -950,11 +947,7 @@ int main() {
 	//[[0i32]][0i32][0i32]をexpr([0i32]access([0i32]))access([0i32])と解釈した方が綺麗
 	expr = access_array;
 
-	BNF nest = (~expr + BNF("'") + &nest).regist<Debug>() | ~expr;//Loaderつけたらいいかも
-	BNF test = (((~ident.regist<Reference>()+BNF("'")) | (~expr + BNF("'"))) + ~nest).regist<Debug>() | expr;
-	expr = test;
-
-
+	
 	BNF source = (extern_function | function|cls);
 	source = ((~source + &source) | ~source);
 	BNF source_wrapper = (~source).regist<Block>();
