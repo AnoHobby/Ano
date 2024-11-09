@@ -653,22 +653,6 @@ public:
 		return array_value;
 	}
 };
-
-class Access_Class :public parser::Node {
-private:
-public:
-	llvm::Value* codegen(build::Builder& builder)override {
-		const auto class_value = branch.front()->codegen(builder);
-		const auto offset = builder.getTypeAnalyzer().search_offset(class_value->getType()->getNonOpaquePointerElementType()->getStructName().str(), branch.back()->value);
-		if (offset) {//a.b.cのような奴はまだ無理
-			return builder.getBuilder().CreateStructGEP(class_value->getType()->getNonOpaquePointerElementType(), class_value, offset.value());
-		}
-		for(auto & member : branch) {
-
-		}
-		return nullptr;
-	}
-};
 class Class :public parser::Node {
 private:
 public:
@@ -716,7 +700,7 @@ public:
 		return nullptr;
 	}
 };
-class Debug :public parser::Node {
+class Access_Class :public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
@@ -739,13 +723,25 @@ public:
 				continue;
 			}
 			builder.getVariables().scope_nest();
-			if (class_value->getType()->isPointerTy() && class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
-				//builder.getModule()->getFunction(member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::"))
-				member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::");
-			}
-			else{
-				//0i32.call()のようなものはASTの再構築ではなく、内部で変数を使って対応
-				//todo_idea:Scope_Nest(&builder)->コンストラクタでnest,デストラクタでbreak
+			if([&] {
+				if (class_value->getType()->isPointerTy() && class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
+					if (builder.getModule()->getFunction(member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::"))) {
+						return false;
+					}
+					member->branch.front()->value.erase(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str().size() + 2/*::.size*/);
+				}
+				return true;
+				/*
+				if (!(class_value->getType()->isPointerTy() && class_value->getType()->getNonOpaquePointerElementType()->isStructTy())) {
+					return true;
+				}
+				else if (builder.getModule()->getFunction(member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::"))) {
+					return false;
+				}
+				member->branch.front()->value.erase(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str().size() + 2);//::.size
+				return true;
+				*/
+				}()){
 				const auto RECEIVER = std::move(avoid_duplication_with_user_definition("receiver"));
 				builder.getVariables().insert_or_assign(
 					RECEIVER,
@@ -928,8 +924,8 @@ int main() {
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
 	expr = BNF().set<String>().regist<String>() | var | ret |static_array|block  | if_expression | for_expression  | reference | call | primary  | (~ident.regist<Reference>()).regist<Load>() | (~constant.regist<Reference>()).regist<Load>() | floating_point | integer;
 	
-	BNF access_class_nest = (~expr + BNF(".") + &access_class_nest).regist<Debug>() | ~expr;//Loaderつけたらいいかも
-	access_class = (((~ident.regist<Reference>() + BNF(".")) | (~expr + BNF("."))) + ~access_class_nest).regist<Debug>();
+	BNF access_class_nest = (~expr + BNF(".") + &access_class_nest).regist<Access_Class>() | ~expr;
+	access_class = (((~ident.regist<Reference>() + BNF(".")) | (~expr + BNF("."))) + ~access_class_nest).regist<Access_Class>();
 	expr = (~access_class).regist<Load>() | expr;
 
 	BNF assign = (~(&access_class | ident.regist<Reference>()) + BNF("=") + ~&expr).regist<Assign>();//callもいる
