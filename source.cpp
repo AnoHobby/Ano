@@ -559,98 +559,62 @@ public:
 		return builder.getBuilder().CreateGlobalStringPtr(value);
 	}
 };
-class StaticArray :public parser::Node{
+class Static_Array :public parser::Node{
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
-		llvm::Value * array_value = builder.getBuilder().CreateAlloca(llvm::ArrayType::get([&builder](this auto self,const auto& branch)->llvm::Type* {
-			if(branch.front()->equal<std::remove_reference_t<decltype(*this)>>())return llvm::ArrayType::get(self(branch.front()->branch),branch.size());
-			return branch.front()->codegen(builder)->getType();
-			}(branch),branch.size()));
-		//builder.getModule()->print(llvm::outs(), nullptr);
-		/*auto array_type = array_value->getType()->getNonOpaquePointerElementType();
-		for (auto index=0; const auto & value : branch) {
-			array_value = builder.getBuilder().CreateGEP(
-				std::exchange(array_type, array_type->getArrayElementType()),
-				array_value,
-				{
-					llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),0),
-					llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),index),
-				}
+		builder.scope_nest();
+		auto array_value = 
+			builder.getBuilder().CreateAlloca(
+				llvm::ArrayType::get([&builder](this auto self, auto& branch)->llvm::Type* {
+					if (branch.front()->equal<std::remove_reference_t<decltype(*this)>>())return llvm::ArrayType::get(self(branch.front()->branch), branch.size());
+					const auto array_first_var = avoid_duplication_with_user_definition("array_first_var");
+					builder.getVariables().insert_or_assign(array_first_var, branch.front()->codegen(builder));
+					branch.front() = std::make_unique<Reference>();
+					branch.front()->value = array_first_var;
+					return builder.getVariables().search(array_first_var).value()->getType();
+					}(branch), branch.size()),
+					branch.size()
 			);
-			builder.getBuilder().CreateStore(value->codegen(builder), array_value);
-			++index;
-		}*/
-
-		[&builder](this auto self,auto& branch,llvm::Value* value,llvm::Type* type)->void{
-			for (auto index=0; auto & node: branch) {
-				const auto element= builder.getBuilder().CreateGEP(
-					type,
-					value,
-					{
-						llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),0),
-						llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),index),
-					}
-				);
-				if (node->equal<std::remove_reference_t<decltype(*this)>>()) {
-					self(
-						node->branch,
-						element,
-						type->getArrayElementType()
-					);
+		std::vector<llvm::Value*> indexes{ llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(), 0) };
+		[&] (this auto self,auto&branch)->void{
+			for (auto index = 0; auto & value:branch){
+				indexes.push_back(llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(), index));
+				if (value->equal<std::remove_reference_t<decltype(*this)>>()) {
+					self(value->branch);
 				}
 				else {
-					builder.getBuilder().CreateStore(node->codegen(builder),element);
+					builder.getBuilder().CreateStore(
+						value->codegen(builder),
+						builder.getBuilder().CreateGEP(
+							array_value->getAllocatedType(),
+							array_value,
+							indexes
+						)
+					);
 				}
+				indexes.pop_back();
 				++index;
 			}
-			}(branch,array_value,array_value->getType()->getNonOpaquePointerElementType());
-
+			}(branch);
+		builder.scope_break();
 		return array_value;
-		//return nullptr;
-		/*const auto last = branch.back()->codegen(builder);
-		const auto array_value = builder.getBuilder().CreateAlloca(llvm::ArrayType::get(last->getType(), branch.size()));
-		const auto store=[&](const auto index,const auto value) {
-			builder.getBuilder().CreateStore(
-				value,
-				builder.getBuilder().CreateGEP(
-					array_value->getType()->getNonOpaquePointerElementType(),
-					array_value,
-					{
-						llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),0),
-						llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),index),
-					}
-					)
-			);
-		};
-		branch.pop_back();
-		store(branch.size(), last);
-		for (auto i = 0; const auto & item:branch) {
-			store(i,item->codegen(builder));
-			++i;
-		}
-		return array_value;*/
 	}
 };
-//‘½ŽŸŒ³”z—ñ‚ÅƒGƒ‰[‚É‚È‚é
-class AccessArray :public parser::Node {
+class Access_Array :public parser::Node {
 private:
 public:
 	llvm::Value* codegen(build::Builder& builder)override {
 		auto array_value = branch.front()->codegen(builder);
-		auto array_type = array_value->getType();
-		branch.erase(branch.begin());
-		for (const auto &index : branch) {
-			array_value=builder.getBuilder().CreateGEP(
-				std::exchange(array_type,array_type->getArrayElementType()),
-				array_value,
-				{
-					llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(),0),
-					index->codegen(builder),
-				}
-			);
+		std::vector<llvm::Value*> indexes{ llvm::ConstantInt::get(builder.getBuilder().getInt32Ty(), 0) };
+		for (auto& index : branch.back()->branch) {
+			indexes.push_back(index->codegen(builder));
 		}
-		return array_value;
+		return 	builder.getBuilder().CreateGEP(
+			array_value->getType()->getNonOpaquePointerElementType(),
+			array_value,
+			indexes
+		);
 	}
 };
 class Class :public parser::Node {
@@ -700,6 +664,17 @@ public:
 		return nullptr;
 	}
 };
+class No_Load :public parser::Node {
+private:
+public:
+	llvm::Value* codegen(build::Builder& builder)override {
+		if (branch.front()->equal<Load>()) {
+			return branch.front()->branch.front()->codegen(builder);
+		}
+		return branch.front()->codegen(builder);
+	}
+};
+
 class Access_Class :public parser::Node {
 private:
 public:
@@ -722,7 +697,7 @@ public:
 					);
 				continue;
 			}
-			builder.getVariables().scope_nest();
+			builder.scope_nest();
 			if([&] {
 				if (class_value->getType()->isPointerTy() && class_value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
 					if (builder.getModule()->getFunction(member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::"))) {
@@ -731,20 +706,10 @@ public:
 					member->branch.front()->value.erase(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str().size() + 2/*::.size*/);
 				}
 				return true;
-				/*
-				if (!(class_value->getType()->isPointerTy() && class_value->getType()->getNonOpaquePointerElementType()->isStructTy())) {
-					return true;
-				}
-				else if (builder.getModule()->getFunction(member->branch.front()->value.insert(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str() + "::"))) {
-					return false;
-				}
-				member->branch.front()->value.erase(0, class_value->getType()->getNonOpaquePointerElementType()->getStructName().str().size() + 2);//::.size
-				return true;
-				*/
 				}()){
 				const auto RECEIVER = std::move(avoid_duplication_with_user_definition("receiver"));
 				builder.getVariables().insert_or_assign(
-					RECEIVER,
+					RECEIVER, 
 					class_value
 				);
 				member->branch.back()->branch.emplace(member->branch.back()->branch.begin(),std::make_unique<Load/*reference‚Å‚à...?*/>());
@@ -752,7 +717,7 @@ public:
 				member->branch.back()->branch.front()->branch.front()->value = RECEIVER;
 			}
 			class_value=member->codegen(builder);
-			builder.getVariables().scope_break();
+			builder.scope_break();
 
 		}
 		return class_value;
@@ -888,7 +853,7 @@ int main() {
 	BNF for_expression = (~BNF("for") + BNF("(") + ~~(~&expr + ((BNF(",") + for_content) | for_content))).regist<Block>();
 	//too bad:for(void,;) for(void 0i32;)->OK‚É‚È‚é‚Ì‚Å‰ü‘P‚µ‚ë
 
-	BNF static_array = (BNF("[") + comma + BNF("]")).regist<StaticArray>();
+	BNF static_array = (BNF("[") + comma + BNF("]")).regist<Static_Array>();
 	/*todo:
 	[
 	0i32,
@@ -910,7 +875,6 @@ int main() {
 	BNF type_specifier = BNF("-") + BNF(">") + ~type;
 	BNF function = (BNF("fn") + ~(ident.regist<Namespace>()) + BNF("(") + ~(BNF(")") | (define_argument + BNF(")")))+(~block)).regist<Function>();
 	
-	//define_class = (~define_class + &define_class) | ~define_class;
 	BNF class_content = ~function;
 	class_content = (class_content + &class_content) | class_content;
 	BNF cls = (BNF("class") + ~class_name + BNF("{")+~class_content+ BNF("}")).regist<Class>();
@@ -922,10 +886,10 @@ int main() {
 	
 	
 	BNF primary = (BNF("(") + ~~&expr + BNF(")")).regist<Block>();
-	expr = BNF().set<String>().regist<String>() | var | ret |static_array|block  | if_expression | for_expression  | reference | call | primary  | (~ident.regist<Reference>()).regist<Load>() | (~constant.regist<Reference>()).regist<Load>() | floating_point | integer;
+	expr = BNF().set<String>().regist<String>() | var | static_array|ret |block  | if_expression | for_expression  | reference | call | primary  | (~ident.regist<Reference>()).regist<Load>() | (~constant.regist<Reference>()).regist<Load>() | floating_point | integer;
 	
 	BNF access_class_nest = (~expr + BNF(".") + &access_class_nest).regist<Access_Class>() | ~expr;
-	access_class = (((~ident.regist<Reference>() + BNF(".")) | (~expr + BNF("."))) + ~access_class_nest).regist<Access_Class>();
+	access_class = ((~expr.regist<No_Load>() + BNF(".")) + ~access_class_nest).regist<Access_Class>();
 	expr = (~access_class).regist<Load>() | expr;
 
 	BNF assign = (~(&access_class | ident.regist<Reference>()) + BNF("=") + ~&expr).regist<Assign>();//call‚à‚¢‚é
@@ -949,12 +913,13 @@ int main() {
 		)
 	) | expr;
 	expr = compare;
-	BNF access_index = BNF("[") + ~&expr + BNF("]");
-	access_index = (access_index + access_index) | access_index;
-	BNF access_array = (~expr + access_index).regist<AccessArray>() | expr;
-	//[[0i32]][0i32][0i32]‚ðexpr([0i32]access([0i32]))access([0i32])‚Æ‰ðŽß‚µ‚½•û‚ªãY—í
-	expr = access_array;
 
+	BNF access_index = BNF("[") + ~&expr + BNF("]");
+	access_index = (access_index + &access_index) | access_index;
+	BNF access_array = (~(~expr).regist<No_Load>() + ~access_index).regist<Access_Array>();
+	//[[0i32]][0i32][0i32]‚ðexpr([0i32]access([0i32]))access([0i32])‚Æ‰ðŽß‚µ‚½•û‚ªãY—í
+	expr = (~access_array).regist<Load>() | expr;
+	//expr = (access_array) | expr;jk
 	
 	BNF source = (extern_function | function|cls);
 	source = ((~source + &source) | ~source);
